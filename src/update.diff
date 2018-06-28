@@ -1,0 +1,104 @@
+commit 001dba3546eb4f5063b7f3fb41f1c6d4c6b84d74
+Merge: 5cc000b 6f5f958
+Author: Ming Chen <v.mingchen@gmail.com>
+Date:   Sat Apr 25 17:45:31 2015 -0400
+
+    WIP on sec_vs_cache: 5cc000b Fix cmake debug flags in PROXY and PCACHE
+
+diff --cc src/FSAL/FSAL_PROXY/handle.c
+index 7e35b09,7e35b09..a802ed5
+--- a/src/FSAL/FSAL_PROXY/handle.c
++++ b/src/FSAL/FSAL_PROXY/handle.c
+@@@ -726,6 -726,6 +726,8 @@@ static int pxy_compoundv4_call(struct p
+  			while (bc < pos) {
+  				int wc = write(rpc_sock, buf, pos - bc);
+  				if (wc <= 0) {
+++					PXY_DBG("pxy_compoundv4_call fail: %s",
+++						strerror(errno));
+  					close(rpc_sock);
+  					break;
+  				}
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
+index 2011007,2011007..4bb90df
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
+@@@ -452,8 -452,8 +452,7 @@@ fsal_status_t cachefs_commit(struct fsa
+  	struct const_buffer_t handle;
+  	struct pcachefs_fsal_obj_handle *hdl = pcachefs_handle(obj_hdl);
+  	fsal_status_t r;
+--	fsal_status_t ret_hdl_init =
+--	    cache_handle_init(pcachefs_handle(obj_hdl), &handle);
+++	fsal_status_t ret_hdl_init = cache_handle_init(hdl, &handle);
+  	if (FSAL_IS_ERROR(ret_hdl_init)) {
+  		return ret_hdl_init;
+  	}
+@@@ -549,13 -549,13 +548,13 @@@ fsal_status_t cachefs_getattrs(struct f
+  	struct fsal_obj_handle *next_hdl;
+  	fsal_status_t ret;
+  	struct pcachefs_fsal_obj_handle *hdl = pcachefs_handle(obj_hdl);
+--	pthread_rwlock_rdlock(&hdl->pc_filesize_lock);
+  	next_hdl = next_handle(obj_hdl);
+  	ret = next_ops.obj_ops->getattrs(next_hdl);
+  	if (!FSAL_IS_ERROR(ret)) {
+++		pthread_rwlock_wrlock(&hdl->pc_filesize_lock);
+  		adjust_attributes_up(obj_hdl, next_hdl);
+++		pthread_rwlock_unlock(&hdl->pc_filesize_lock);
+  	}
+--	pthread_rwlock_unlock(&hdl->pc_filesize_lock);
+  	return ret;
+  }
+  
+diff --cc src/libntirpc
+index f5bd35f,f5bd35f..8e2fb0e
+--- a/src/libntirpc
++++ b/src/libntirpc
+@@@ -1,1 -1,1 +1,1 @@@
+--Subproject commit f5bd35f32f3475c50238b652334c7d848c742d2e
+++Subproject commit 8e2fb0e8b5bdc76146351bd01f9ddd9ccf226b8d
+diff --cc src/secnfs/cache/ProxyCache.h
+index 94b60ba,94b60ba..0129003
+--- a/src/secnfs/cache/ProxyCache.h
++++ b/src/secnfs/cache/ProxyCache.h
+@@@ -39,7 -39,7 +39,7 @@@
+  #include "util/cache_interface.h"
+  #include "util/slice.h"
+  
+--#define MAX_EXTENT_SIZE 1048576
+++#define MAX_EXTENT_SIZE 524288
+  
+  DECLARE_int32(proxy_cache_capacity_mb);
+  
+diff --cc src/secnfs/cache/ProxyCacheTest.cpp
+index cd66d51,cd66d51..2e5ebb8
+--- a/src/secnfs/cache/ProxyCacheTest.cpp
++++ b/src/secnfs/cache/ProxyCacheTest.cpp
+@@@ -587,8 -587,8 +587,8 @@@ TEST_F(ProxyCacheTest, fsxReplay) 
+    InsertDirty("aaa", 106496, 32768, 1);
+    cache_->Commit("aaa", 0, 139264);
+    ExpectPollAndWriteBack("aaa", true, 106496, 32768, true);
+++  InsertClean("aaa", 73728, 32768);
+    ExpectLookup("aaa", 106496, 28672, FULL_MATCH, 106496, 28672);
+--  InsertClean("aaa", 73728, 28672);
+  }
+  
+  // TODO(mchen): delete a file with polled dirty extent
+diff --cc src/secnfs/capi/proxy_cache.cpp
+index 41c8c3e,41c8c3e..976724d
+--- a/src/secnfs/capi/proxy_cache.cpp
++++ b/src/secnfs/capi/proxy_cache.cpp
+@@@ -5,12 -5,12 +5,13 @@@
+   * Implementation of ProxyCache's C interface to NFS-Ganesha.
+   */
+  
+--#include <glog/logging.h>
+--
+  #include "capi/proxy_cache.h"
+  
+++#include <glog/logging.h>
+++
+  #include <memory>
+  #include <string>
+++
+  #include "cache/ProxyCache.h"
+  #include "cache/FileCache.h"
+  #include "capi/cpputil.h"

@@ -1,0 +1,355 @@
+diff --git a/.gitmodules b/.gitmodules
+index 21df7e2..0f1005b 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,4 +1,4 @@
+ [submodule "src/libntirpc"]
+ 	path = src/libntirpc
+ 	url = https://github.com/nfs-ganesha/ntirpc.git 
+-
++	ignore = dirty
+diff --git a/secnfs/config/sec_vs_cache.ganesha.conf b/secnfs/config/sec_vs_cache.ganesha.conf
+index 891566f..31e5558 100644
+--- a/secnfs/config/sec_vs_cache.ganesha.conf
++++ b/secnfs/config/sec_vs_cache.ganesha.conf
+@@ -407,6 +407,7 @@ EXPORT
+   #}
+ 
+   Pseudo = /vfs-ganesha;
++  #Pseudo = /vfs0;
+ 
+   #Cache_Data = FALSE ;
+ 
+diff --git a/src/FSAL/FSAL_PROXY/handle.c b/src/FSAL/FSAL_PROXY/handle.c
+index 0500825..8c0092c 100644
+--- a/src/FSAL/FSAL_PROXY/handle.c
++++ b/src/FSAL/FSAL_PROXY/handle.c
+@@ -1264,6 +1264,101 @@ static fsal_status_t pxy_create(struct fsal_obj_handle *dir_hdl,
+ 	return st;
+ }
+ 
++static fsal_status_t pxy_create_plus(struct fsal_obj_handle *dir_hdl,
++				     const char *name,
++				     struct attrlist *attrib,
++				     size_t init_buffer_size,
++				     void *init_buffer,
++				     struct fsal_obj_handle **handle,
++				     size_t *wrote_amount)
++{
++	int rc;
++	int opcnt = 0;
++	fattr4 input_attr;
++	char padfilehandle[NFS4_FHSIZE];
++	char fattr_blob[FATTR_BLOB_SZ];
++#define FSAL_CREATE_PLUS_NB_OP_ALLOC 5
++	nfs_argop4 argoparray[FSAL_CREATE_PLUS_NB_OP_ALLOC];
++	nfs_resop4 resoparray[FSAL_CREATE_PLUS_NB_OP_ALLOC];
++	char owner_val[128];
++	unsigned int owner_len = 0;
++	GETFH4resok *fhok;
++	GETATTR4resok *atok;
++	OPEN4resok *opok;
++	WRITE4resok *wok;
++	struct pxy_obj_handle *ph;
++	fsal_status_t st;
++	clientid4 cid;
++
++	__sync_fetch_and_add(&pxy_counters.nr_creates, 1);
++
++	/* Create the owner */
++	snprintf(owner_val, sizeof(owner_val), "GANESHA/PROXY: pid=%u %" PRIu64,
++		 getpid(), atomic_inc_uint64_t(&fcnt));
++	owner_len = strnlen(owner_val, sizeof(owner_val));
++
++	attrib->mask &= ATTR_MODE | ATTR_OWNER | ATTR_GROUP;
++	if (pxy_fsalattr_to_fattr4(attrib, &input_attr) == -1)
++		return fsalstat(ERR_FSAL_INVAL, -1);
++
++	ph = container_of(dir_hdl, struct pxy_obj_handle, obj);
++	COMPOUNDV4_ARG_ADD_OP_PUTFH(opcnt, argoparray, ph->fh4);
++
++	opok = &resoparray[opcnt].nfs_resop4_u.opopen.OPEN4res_u.resok4;
++	opok->attrset = empty_bitmap;
++	pxy_get_clientid(&cid);
++	COMPOUNDV4_ARG_ADD_OP_OPEN_CREATE(opcnt, argoparray, (char *)name,
++					  input_attr, cid, owner_val,
++					  owner_len);
++
++	wok = &resoparray[opcnt].nfs_resop4_u.opwrite.WRITE4res_u.resok4;
++	COMPOUNDV4_ARG_ADD_OP_WRITE(opcnt, argoparray, 0, init_buffer,
++				    init_buffer_size);
++
++	fhok = &resoparray[opcnt].nfs_resop4_u.opgetfh.GETFH4res_u.resok4;
++	fhok->object.nfs_fh4_val = padfilehandle;
++	fhok->object.nfs_fh4_len = sizeof(padfilehandle);
++	COMPOUNDV4_ARG_ADD_OP_GETFH(opcnt, argoparray);
++
++	atok = pxy_fill_getattr_reply(resoparray + opcnt, fattr_blob,
++				      sizeof(fattr_blob));
++	COMPOUNDV4_ARG_ADD_OP_GETATTR(opcnt, argoparray, pxy_bitmap_getattr);
++
++	rc = pxy_nfsv4_call(op_ctx->fsal_export, op_ctx->creds,
++			    opcnt, argoparray, resoparray);
++	nfs4_Fattr_Free(&input_attr);
++	if (rc != NFS4_OK)
++		return nfsstat4_to_fsal(rc);
++
++	*wrote_amount = wok->count;
++
++	/* See if a OPEN_CONFIRM is required */
++	if (opok->rflags & OPEN4_RESULT_CONFIRM) {
++		st = pxy_open_confirm(op_ctx->creds, &fhok->object,
++				      &opok->stateid,
++				      op_ctx->fsal_export);
++		if (FSAL_IS_ERROR(st)) {
++			LogDebug(COMPONENT_FSAL,
++				"pxy_open_confirm failed: status %d", st);
++			return st;
++		}
++	}
++
++	/* The created file is still opened, to preserve the correct
++	 * seqid for later use, we close it */
++	st = pxy_do_close(op_ctx->creds, &fhok->object, &opok->stateid,
++			  op_ctx->fsal_export);
++	if (FSAL_IS_ERROR(st))
++		return st;
++	st = pxy_make_object(op_ctx->fsal_export,
++			     &atok->obj_attributes,
++			     &fhok->object, handle);
++	if (FSAL_IS_ERROR(st))
++		return st;
++	*attrib = (*handle)->attributes;
++	return st;
++}
++
+ static fsal_status_t pxy_mkdir(struct fsal_obj_handle *dir_hdl,
+ 			       const char *name, struct attrlist *attrib,
+ 			       struct fsal_obj_handle **handle)
+@@ -2134,6 +2229,7 @@ void pxy_handle_ops_init(struct fsal_obj_ops *ops)
+ 	ops->lookup = pxy_lookup;
+ 	ops->readdir = pxy_readdir;
+ 	ops->create = pxy_create;
++	ops->create_plus = pxy_create_plus;
+ 	ops->mkdir = pxy_mkdir;
+ 	ops->mknode = pxy_mknod;
+ 	ops->symlink = pxy_symlink;
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
+index 72b00b3..dbf3494 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
+@@ -287,33 +287,51 @@ static fsal_status_t create(struct fsal_obj_handle *dir_hdl,
+         struct fsal_obj_handle *next_hdl;
+         struct secnfs_fsal_obj_handle *new_hdl;
+         fsal_status_t st;
++        void *header_buf;
++        uint32_t header_size;
++        size_t header_wrote;
++        int ret;
+ 
+         SECNFS_D("CREATING '%s' in dir hdl (%x)", name, hdl);
+ 
+ 	__sync_fetch_and_add(&sn_counters.nr_creates, 1);
+ 
+-        st = next_ops.obj_ops->create(hdl->next_handle, name,
+-                                      attrib, &next_hdl);
+-        if (FSAL_IS_ERROR(st))
+-                return st;
+-
+-        st = make_handle_from_next(op_ctx->fsal_export, next_hdl, handle);
+-        if (FSAL_IS_ERROR(st)) {
+-                LogCrit(COMPONENT_FSAL, "cannot create secnfs handle");
+-                return st;
+-        }
+-
+         if (attrib->type == REGULAR_FILE) {
+                 new_hdl = secnfs_handle(*handle);
+                 generate_key_and_iv(&new_hdl->fk, &new_hdl->iv);
+                 new_hdl->key_initialized = 1;
+                 new_hdl->has_dirty_meta = 0;
+                 new_hdl->encrypted = new_hdl->info->file_encryption;
+-                SECNFS_D("key in new handle (%x) initialized; encryption %s",
+-                         new_hdl, new_hdl->encrypted ? "enabled" : "disabled");
+-                st = write_header(*handle);
++
++                ret = secnfs_create_header(hdl->info, &hdl->fk, &hdl->iv,
++                                           0,
++                                           hdl->encrypted,
++                                           hdl->holes,
++                                           &header_buf,
++                                           &header_size,
++                                           &hdl->kf_cache);
++		if (ret != SECNFS_OKAY) {
++                        SECNFS_F("failed to initial the headerj");
++                        return fsalstat(ERR_FSAL_SERVERFAULT, 0);
++		}
++		st = next_ops.obj_ops->create_plus(
++		    hdl->next_handle, name, attrib, header_size, header_buf,
++		    &next_hdl, &header_wrote);
++	} else {
++		st = next_ops.obj_ops->create(hdl->next_handle, name, attrib,
++					      &next_hdl);
++	}
++        if (FSAL_IS_ERROR(st))
++                goto out;
++
++        st = make_handle_from_next(op_ctx->fsal_export, next_hdl, handle);
++        if (FSAL_IS_ERROR(st)) {
++                LogCrit(COMPONENT_FSAL, "cannot create secnfs handle");
++                goto out;
+         }
+ 
++out:
++        free(header_buf);
+         return st;
+ }
+ 
+diff --git a/src/FSAL/default_methods.c b/src/FSAL/default_methods.c
+index cddaa10..4be4cbf 100644
+--- a/src/FSAL/default_methods.c
++++ b/src/FSAL/default_methods.c
+@@ -803,6 +803,45 @@ static fsal_status_t file_close(struct fsal_obj_handle *obj_hdl)
+ 	return fsalstat(ERR_FSAL_NOTSUPP, 0);
+ }
+ 
++/* open_plus
++ * default case not supported
++ */
++static fsal_status_t file_open_plus(struct fsal_obj_handle *obj_hdl,
++				    fsal_openflags_t openflags,
++				    uint64_t offset,
++				    size_t buffer_size,
++				    void *buffer,
++				    size_t *read_amount)
++{
++	return fsalstat(ERR_FSAL_NOTSUPP, 0);
++}
++
++/* create_plus
++ * default case not supported
++ */
++static fsal_status_t file_create_plus(struct fsal_obj_handle *obj_hdl,
++				      const char *name,
++				      struct attrlist *attrib,
++				      size_t init_buffer_size,
++				      void *init_buffer,
++				      struct fsal_obj_handle **new_obj,
++				      size_t *wrote_amount)
++{
++	return fsalstat(ERR_FSAL_NOTSUPP, 0);
++}
++
++/* close_plus
++ * default case not supported
++ */
++static fsal_status_t file_close_plus(struct fsal_obj_handle *obj_hdl,
++				     uint64_t offset,
++				     size_t buffer_size,
++				     void *buffer,
++				     size_t *wrote_amount)
++{
++	return fsalstat(ERR_FSAL_NOTSUPP, 0);
++}
++
+ /* list_ext_attrs
+  * default case not supported
+  */
+@@ -1038,6 +1077,9 @@ struct fsal_obj_ops def_handle_ops = {
+ 	.lock_op = lock_op,
+ 	.share_op = share_op,
+ 	.close = file_close,
++	.open_plus = file_open_plus,
++	.create_plus = file_create_plus,
++	.close_plus = file_close_plus,
+ 	.list_ext_attrs = list_ext_attrs,
+ 	.getextattr_id_by_name = getextattr_id_by_name,
+ 	.getextattr_value_by_name = getextattr_value_by_name,
+diff --git a/src/include/fsal_api.h b/src/include/fsal_api.h
+index b9d7c14..c6260a7 100644
+--- a/src/include/fsal_api.h
++++ b/src/include/fsal_api.h
+@@ -1725,6 +1725,77 @@ struct fsal_obj_ops {
+  * @return FSAL status.
+  */
+ 	 fsal_status_t(*close) (struct fsal_obj_handle *obj_hdl);
++
++/**
++ * @brief Open a file for read or write.
++ *
++ * This function opens a file for read or write, and optionally perform an
++ * initial read operation following the open.  The file already be opened when
++ * this function is called.  The thread calling this function will have hold
++ * the Cache inode content lock exclusively and the FSAL may assume whatever
++ * private state it uses to manage open/close status is protected.
++ *
++ * @param[in] obj_hdl   File to open
++ * @param[in] openflags Mode for open
++ * @param[in]  offset      Position from which to read
++ * @param[in]  buffer_size Amount of data to read
++ * @param[out] buffer      Buffer to which data are to be copied
++ * @param[out] read_amount Amount of data read
++ *
++ * @return FSAL status.
++ */
++	 fsal_status_t(*open_plus) (struct fsal_obj_handle *obj_hdl,
++				    fsal_openflags_t openflags,
++				    uint64_t offset,
++				    size_t buffer_size,
++				    void *buffer,
++				    size_t *read_amount);
++
++/**
++ * @brief Create a regular file
++ *
++ * This function creates a new regular file, and write an initial part of the
++ * file at the very beginning.
++ *
++ * @param[in]     dir_hdl Directory in which to create the file
++ * @param[in]     name    Name of file to create
++ * @param[in,out] attrib  Attributes to set on newly created
++ *                        object/attributes you actually got.
++ * @param[in]     buffer_size Amount of initial data to read
++ * @param[out]    buffer  Buffer of initial data
++ * @param[out]    new_obj Newly created object
++ * @param[out]    wrote_amount Amount of data wrote
++ *
++ * @return FSAL status.
++ */
++	 fsal_status_t(*create_plus) (struct fsal_obj_handle *dir_hdl,
++				      const char *name,
++				      struct attrlist *attrib,
++				      size_t init_buffer_size,
++				      void *init_buffer,
++				      struct fsal_obj_handle **new_obj,
++				      size_t *wrote_amount);
++
++/**
++ * @brief Close a file
++ *
++ * This function closes a file.  It is protected by the Cache inode
++ * content lock.  Optionally, it write a finalizing write before the close.
++ *
++ * @param[in] obj_hdl File to close
++ * @param[in]  offset       Position at which to write
++ * @param[in]  buffer_size  Amount of data to be written
++ * @param[in]  buffer       Data to be written
++ * @param[out] wrote_amount Amount of data wrote
++ *
++ * @return FSAL status.
++ */
++	 fsal_status_t(*close_plus) (struct fsal_obj_handle *obj_hdl,
++				     uint64_t offset,
++				     size_t buffer_size,
++				     void *buffer,
++				     size_t *wrote_amount);
++
+ /**@}*/
+ 
+ /**@{*/
+diff --git a/src/libntirpc b/src/libntirpc
+index f5bd35f..8e2fb0e 160000
+--- a/src/libntirpc
++++ b/src/libntirpc
+@@ -1 +1 @@
+-Subproject commit f5bd35f32f3475c50238b652334c7d848c742d2e
++Subproject commit 8e2fb0e8b5bdc76146351bd01f9ddd9ccf226b8d

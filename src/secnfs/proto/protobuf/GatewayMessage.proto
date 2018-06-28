@@ -1,0 +1,132 @@
+// Inter-Gateway communication messages
+package secnfs.proto;
+
+import "proto/Namespace.proto"
+
+enum OperationType {
+  CREATE_DIR = 0;
+  REMOVE_DIR = 1;
+  CREATE_FILE = 2;
+  UNLINK_FILE = 3;
+  UPDATE_FILE = 4;
+  CHANGE_FILEMETA = 5;
+  CHANGE_DIRMETA = 6;
+  RENAME = 7;
+  CLAIM_MASTER = 8;
+  RENOUNCE_MASTER = 9;
+  ACK_MASTER = 10;
+  CREATE_VOLUME = 11;
+  REMOVE_VOLUME = 12;
+}
+
+message CreateVolume {
+  required string volumeid;   // a volumeid consists of the name of its
+                              // creator (gateway) and a volume name provided
+                              // by client
+}
+
+// Used for experiments, not a command to try in real deployment.
+message RemoveVolume {
+  required string volumeid;
+}
+
+enum CreateFlags {
+  CREATE = 0;         // create file/dir that did not exist in any gateway
+  COPY = 1;           // create by copying existing file/dir from a gateway
+}
+
+message CreateDir {
+  required Directory dir;
+  required CreateFlags flags;
+}
+
+message RemoveDir {
+  required string fsid;
+}
+
+message CreateFile {
+  required File file;
+  required CreateFlags flags;
+  optional KeyMap;    // set only if flags is COPY
+  optional BlockMap;  // set only if flags is COPY
+}
+
+message UnlinkFile {
+  required string fsid;
+}
+
+message UpdateFile {
+  required string fsid;
+  required uint64 offset;
+  required uint64 length;
+  repeated bytes new_versions;
+}
+
+// change file attributes and info
+message ChangeFileMeta {
+  required string fsid;
+  optional File old_file;
+  optional File new_file;
+}
+
+message ChangeDirMeta {
+  required string fsid;
+  required Directory dir;         // without an empty DirEntry
+}
+
+message Rename {
+  required string olddir_fsid;
+  required string old_fsid;
+  required string newdir_fsid;
+  required string new_fsid;
+}
+
+// claim mastership of a file
+message ClaimMaster {
+  required string fsid;
+  required uint32 timeout;        // lease time
+  required string cookie;         // a cookie that identify this claim
+}
+
+// renounce mastership of a file
+// TODO: support more types of mastership (lease) as FARSITE does
+message RenounceMaster {
+  required string fsid;
+  required string cookie;         // a cookie that identify this renounce
+}
+
+// acknowledge mastership claim or renounce
+message AckMaster {
+  required string cookie;         // identify the op being acknowledged
+}
+
+enum OperationFlags {
+  FLUSH = 0;
+}
+
+// TODO: How to initialize a newly added gateway
+message FSOperation {
+  required OperationType type;
+  optional string volumeid;       // the volume being operated
+  optional uint64 timestamp;
+  optional uint32 op_flags;
+  optional CreateVolume create_volume;
+  optional RemoveVolume remove_volume;
+  optional CreateDir create_dir;
+  optional RemoveDir remove_dir;
+  optional CreateFile create_file;
+  optional UnlinkFile unlink_file;
+  optional UpdateFile update_file;
+  optional ChangeFileMeta change_filemeta;
+  optional ChangeDirMeta change_dirmeta;
+  optional Rename rename;
+  optional ClaimMaster claim_master;
+  optional RenounceMaster renounce_master;
+}
+
+message GatewayMessage {
+  required string gw_name;        // gateway that initialize this op
+  repeated FSOperation operations;
+}
+
+// vim:sw=2:ts=2:sts=2:tw=80:expandtab:cinoptions=>2,(0\:0:

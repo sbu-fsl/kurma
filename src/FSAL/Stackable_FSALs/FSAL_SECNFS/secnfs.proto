@@ -1,0 +1,72 @@
+package secnfs;
+
+message TimeSpec {
+  required uint64 seconds = 1;
+  required uint64 nano_seconds = 2;
+}
+
+message FileHeader {
+  required KeyFile keyfile = 1;
+  optional bytes meta = 2;	// encrypted meta
+  optional bytes version = 3;	// version of header
+
+  // The following three fields are effective timestamps and changeid of the
+  // file. They may be different from the corresponding values from the NFS
+  // server because writing file header changes these attributes.
+  optional TimeSpec modify_time = 4;
+  optional TimeSpec change_time = 5;
+  optional uint64 change = 6;
+}
+
+message FileMeta {
+  optional uint64 filesize = 1;
+  optional bool encrypted = 2;
+  repeated Range holes = 3;
+}
+
+message Range {
+  required uint64 offset = 1; // 4K aligned
+  required uint64 length = 2; // 4K aligned
+}
+
+message KeyFile {
+  required string creator = 1;
+  required bytes iv = 2;
+  repeated KeyBlock key_blocks = 3;
+  optional bytes signature = 4;
+}
+
+message KeyBlock {
+  required string proxy_name = 1;
+  required bytes encrypted_key = 2;
+}
+
+message SecureContextConfig {
+  required string name = 1;
+  required bytes pub_key = 2;
+  required bytes pri_key = 3;
+  // repeated KeyBlock proxies = 4;
+}
+
+message ProxyList {
+  repeated ProxyEntry proxies = 1;
+}
+
+message ProxyEntry {
+  required string name = 1;
+  required bytes key = 2;   // public key
+}
+
+message FilenameEntry {
+  // Used as file names on server side; has to be unique per directory.
+  required uint32 entry_id = 1;
+  required bytes encrypted_name = 2;
+}
+
+message DirMapFile {
+  required string creator = 1;
+  required bytes iv = 2;
+  repeated KeyBlock key_blocks = 3;
+  required FilenameEntry filenames = 4;
+  optional bytes signature = 6;
+}

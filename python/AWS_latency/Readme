@@ -1,0 +1,26 @@
+Replicating data on AWS S3
+==========================
+
+AWS buckets are region bound
+Each region is comprised of multiple AZs (Availability zones)
+Each AZ is a data center and AZs in the same region can see each other straight away
+
+If you make a bucket without specifying region, it gets created in US-standard region
+If you make a bucket with region specified, then in order to access it, you must connect to the same region
+If you are in the same region, the latency will be lower -> Cross region replication
+
+Cross region replication:
+-------------------------
+This is possible but it must be set up before hand
+Versioning must be enabled on the buckets
+You have to create a role that AWS can assume and use to replicate data
+Data is replicated between "source" and "destination" buckets
+Each region should have one bucket
+One source bucket can replicate to one destination bucket, not multiple
+
+References:
+-----------
+http://docs.aws.amazon.com/AmazonS3/latest/dev/crr-walkthrough1.html
+http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.RegionsAndAvailabilityZones.html
+http://docs.aws.amazon.com/general/latest/gr/rande.html#s3_region
+http://stackoverflow.com/questions/23239877/how-does-boto-choose-aws-region-to-create-buckets

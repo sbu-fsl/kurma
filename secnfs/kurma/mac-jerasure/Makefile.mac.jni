@@ -1,0 +1,31 @@
+CC = g++
+CFLAGS = -g -O3
+# Find Java and set jni header path
+JAVAC := $(shell which javac)
+JAVA_VERSION := $(shell java -version 2>&1 | head -n 1 | cut -d ' ' -f 3 | tr -d '"')
+JAVA_HOME := /Library/Java/JavaVirtualMachines/jdk$(JAVA_VERSION).jdk/Contents/Home
+JNI_HEADERS_PATH := $(JAVA_HOME)/include
+
+$(info "Java version: $(JAVA_VERSION)")
+$(info "Java home: $(JAVA_HOME)")
+$(info "JNI header path: $(JNI_HEADERS_PATH)")
+
+OBJS = javautility.o JCauchy.o JGalois.o JJerasure.o JLiberation.o JReedSolomon.o
+
+all: ../../lib/libJerasure.jni.jnilib
+
+ ../../lib/libJerasure.jni.jnilib: $(OBJS)
+	$(CC) -dynamiclib -I$(JNI_HEADERS_PATH) -I $(JNI_HEADERS_PATH)/darwin -o ../../lib/libJerasure.jni.jnilib ../../lib/libJerasure.dylib $(OBJS)
+
+clean: 
+	rm -f ../../lib/libJerasure.jni.jnilib* $(OBJS)
+
+%.o: %.cpp
+	$(CC) $(CFLAGS) -I$(JNI_HEADERS_PATH) -I$(JNI_HEADERS_PATH)/darwin -I ../include -fPIC -c $<
+
+javautility.o: javautility.h
+JCauchy.o: JCauchy.h
+JGalois.o: JGalois.h
+JJerasure.o: JJerasure.h
+JLiberation.o: JLiberation.h
+JReedSolomon.o: JReedSolomon.h

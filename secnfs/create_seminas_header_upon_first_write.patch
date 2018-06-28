@@ -1,0 +1,793 @@
+diff --git a/.gitmodules b/.gitmodules
+index 21df7e2..0f1005b 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,4 +1,4 @@
+ [submodule "src/libntirpc"]
+ 	path = src/libntirpc
+ 	url = https://github.com/nfs-ganesha/ntirpc.git 
+-
++	ignore = dirty
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/file.c b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/file.c
+index ded6946..2f0e765 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/file.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/file.c
+@@ -44,11 +44,11 @@
+ 
+ extern struct next_ops next_ops;
+ 
+-static bool should_read_header(const struct secnfs_fsal_obj_handle *hdl)
++static bool should_read_header(struct secnfs_fsal_obj_handle *hdl)
+ {
+         return hdl->obj_handle.type == REGULAR_FILE
+                 && hdl->obj_handle.attributes.filesize > 0
+-                && !hdl->key_initialized;
++                && !secnfs_is_key_initialized(hdl);
+ }
+ 
+ 
+@@ -69,7 +69,7 @@ fsal_status_t secnfs_open(struct fsal_obj_handle *obj_hdl,
+         if (!FSAL_IS_ERROR(st) && should_read_header(hdl)) {
+                 // read file key, iv and meta
+                 SECNFS_D("hdl = %x; reading header\n", hdl);
+-                st = read_header(obj_hdl);
++                st = read_header(hdl);
+         }
+ 
+         return st;
+@@ -162,7 +162,7 @@ fsal_status_t do_aligned_read(struct secnfs_fsal_obj_handle *hdl,
+                 goto out;
+         }
+ 
+-        for (i = 0; i < get_pi_count(*read_amount); i++) {
++	for (i = 0; i < get_pi_count(*read_amount); i++) {
+                 extract_from_sd_dif(pi_buf + i * PI_SD_DIF_SIZE, secnfs_dif_buf,
+                                     PI_SECNFS_DIF_SIZE, 1);
+                 secnfs_dif_from_buf(&secnfs_dif, secnfs_dif_buf);
+@@ -176,8 +176,8 @@ fsal_status_t do_aligned_read(struct secnfs_fsal_obj_handle *hdl,
+                          secnfs_dif.tag[0], secnfs_dif.tag[15]);
+ 
+                 /* may carefully decrypt to user buffer to save memcpy */
+-                if (hdl->encrypted)
+-                        ret = secnfs_verify_decrypt(
++		if (secnfs_is_encrypted(hdl))
++			ret = secnfs_verify_decrypt(
+                                         hdl->fk,
+                                         hdl->iv,
+                                         offset_align + i * PI_INTERVAL_SIZE,
+@@ -187,8 +187,8 @@ fsal_status_t do_aligned_read(struct secnfs_fsal_obj_handle *hdl,
+                                         version_buf,
+                                         secnfs_dif.tag,
+                                         buffer_align + i * PI_INTERVAL_SIZE,
+-                                        !hdl->encrypted);
+-                else /* integrity only */
++                                        false);
++		else /* integrity only */
+                         ret = secnfs_mac_verify(
+                                         hdl->fk,
+                                         hdl->iv,
+@@ -218,14 +218,14 @@ out:
+  * write_amount will be truncated (pi_round_down) if not aligned.
+  * caller should maintain the file holes.
+  */
+-fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+-                               uint64_t offset_align, size_t size_align,
+-                               void *plain_align, size_t *write_amount,
+-                               bool *fsal_stable)
++static fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
++				      uint64_t offset_align, size_t size_align,
++				      void *plain_align, size_t *write_amount,
++				      bool *fsal_stable, bool prepend_header)
+ {
+         struct io_info info;
+         uint64_t next_offset;
+-        size_t pi_size;
++        size_t pi_size, pd_size;
+         uint8_t *pd_buf;
+         uint8_t *pi_buf = NULL;
+         uint8_t *secnfs_dif_buf = NULL;
+@@ -234,25 +234,49 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+         fsal_status_t st;
+         secnfs_s ret;
+         int i;
++	bool is_encrypted = secnfs_is_encrypted(hdl);
+ 
+-        assert(is_pi_aligned(offset_align));
+-        assert(is_pi_aligned(size_align));
++	assert(is_pi_aligned(FILE_HEADER_SIZE));
++	assert(is_pi_aligned(offset_align));
++	assert(is_pi_aligned(size_align));
+ 
+-        SECNFS_D("hdl = %x; do aligned write to %u (%u)\n", hdl,
+-                 offset_align, size_align);
+-
+-        next_offset = offset_align + FILE_HEADER_SIZE;
++	SECNFS_D("hdl = %x; do aligned write to %u (%u); prepend header: %d\n",
++		 hdl, offset_align, size_align, prepend_header);
+ 
+         /* allocate buffer for ciphertext in encryption mode */
+-        pd_buf = plain_align;
+-        if (hdl->encrypted) {
+-                pd_buf = gsh_malloc(size_align + TAG_SIZE);
+-                if (!pd_buf)
+-                        return fsalstat(ERR_FSAL_NOMEM, 0);
+-        }
++        if (prepend_header) {
++                assert(offset_align == 0);
++                next_offset = 0;
++                pd_size = FILE_HEADER_SIZE + size_align;
++                if (is_encrypted) {     /* is_encrypted && prepend_header */
++			pd_buf = gsh_malloc(pd_size + TAG_SIZE);
++			if (!pd_buf)
++				return fsalstat(ERR_FSAL_NOMEM, 0);
++		} else {                /* !is_encrypted && prepend_header */
++                        pd_buf = gsh_malloc(pd_size);
++                        if (!pd_buf)
++                                return fsalstat(ERR_FSAL_NOMEM, 0);
++                }
++                /* prepare header */
++		ret = secnfs_create_header_in_buffer(
++		    hdl->info, &hdl->fk, &hdl->iv, get_filesize(hdl),
++		    is_encrypted, hdl->holes, pd_buf, FILE_HEADER_SIZE,
++		    &hdl->kf_cache);
++		assert(ret == SECNFS_OKAY);
++	} else {
++		next_offset = offset_align + FILE_HEADER_SIZE;
++		pd_size = size_align;
++		if (is_encrypted) {     /* is_encrypted && !prepend_header */
++			pd_buf = gsh_malloc(size_align + TAG_SIZE);
++			if (!pd_buf)
++				return fsalstat(ERR_FSAL_NOMEM, 0);
++		} else {                /* !is_encrypted && !prepend_header */
++			pd_buf = plain_align;
++		}
++	}
+ 
+         /* allocate buffer for protection info (DIF) */
+-        pi_size = get_pi_size(size_align);
++        pi_size = get_pi_size(pd_size);
+         pi_buf = gsh_malloc(pi_size);
+         SECNFS_D("hdl = %x; pi_size = %u\n", hdl, pi_size);
+         if (!pi_buf) {
+@@ -260,6 +284,12 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+                 goto out;
+         }
+ 
++        /* adjust buffers to ignore the header */
++        if (prepend_header) {
++                pd_buf += FILE_HEADER_SIZE;
++                pi_buf += get_pi_size(FILE_HEADER_SIZE);
++        }
++
+         /* allocate buffer for serialization of secnfs_dif_t */
+         secnfs_dif_buf = gsh_malloc(PI_SECNFS_DIF_SIZE);
+         if (!secnfs_dif_buf) {
+@@ -271,8 +301,8 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+         uint64_to_bytes(version_buf, secnfs_dif.version);
+ 
+         for (i = 0; i < get_pi_count(size_align); i++) {
+-                if (hdl->encrypted)
+-                        ret = secnfs_auth_encrypt(
++		if (is_encrypted)
++			ret = secnfs_auth_encrypt(
+                                         hdl->fk,
+                                         hdl->iv,
+                                         offset_align + i * PI_INTERVAL_SIZE,
+@@ -282,7 +312,7 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+                                         version_buf,
+                                         pd_buf + i * PI_INTERVAL_SIZE,
+                                         secnfs_dif.tag,
+-                                        !hdl->encrypted);
++                                        false);
+                 else /* integrity only */
+                         ret = secnfs_mac_generate(
+                                         hdl->fk,
+@@ -310,13 +340,19 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+         }
+         // dump_pi_buf(pi_buf, pi_size);
+ 
++        /* adjust buffers to include the header */
++        if (prepend_header) {
++                pd_buf -= FILE_HEADER_SIZE;
++                pi_buf -= get_pi_size(FILE_HEADER_SIZE);
++        }
++
+         /* prepare io_info for write_plus */
+         io_info_set_content(&info, next_offset,
+                             pi_size, pi_buf,
+-                            size_align, pd_buf);
++                            pd_size, pd_buf);
+ 
+         st = next_ops.obj_ops->write_plus(hdl->next_handle,
+-                                          next_offset, size_align,
++                                          next_offset, pd_size,
+                                           pd_buf, write_amount,
+                                           fsal_stable,
+                                           &info);
+@@ -325,15 +361,15 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+                 /* XXX WORKAROUND for EINVAL kernel bug */
+                 if (!(st.major == ERR_FSAL_INVAL &&
+                         secnfs_range_has_hole(hdl->holes, offset_align,
+-                                              size_align)))
++                                              pd_size)))
+                         goto out;
+         }
+         /* XXX WORKAROUND for EINVAL kernel bug */
+         if (st.major == ERR_FSAL_INVAL &&
+-                secnfs_range_has_hole(hdl->holes, offset_align, size_align)) {
++                secnfs_range_has_hole(hdl->holes, offset_align, pd_size)) {
+                 SECNFS_D("hdl = %x; WORKAROUND write-then-write_plus", hdl);
+                 st = next_ops.obj_ops->write(hdl->next_handle,
+-                                             next_offset, size_align,
++                                             next_offset, pd_size,
+                                              pd_buf, write_amount,
+                                              fsal_stable);
+                 if (FSAL_IS_ERROR(st)) {
+@@ -341,7 +377,7 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+                         goto out;
+                 }
+                 st = next_ops.obj_ops->write_plus(hdl->next_handle,
+-                                                  next_offset, size_align,
++                                                  next_offset, pd_size,
+                                                   pd_buf, write_amount,
+                                                   fsal_stable,
+                                                   &info);
+@@ -355,15 +391,15 @@ fsal_status_t do_aligned_write(struct secnfs_fsal_obj_handle *hdl,
+         *write_amount = pi_round_down(*write_amount);
+         SECNFS_D("hdl = %x; write_amount_align = %u", hdl, *write_amount);
+         // assert(*write_amount <= size_align);
+-        if (*write_amount > size_align)
++        if (*write_amount > pd_size)
+                 SECNFS_ERR("hdl = %x; write_amount > size_align", hdl);
+ 
+ out:
+-        if (hdl->encrypted) gsh_free(pd_buf);
+-        gsh_free(pi_buf);
+-        gsh_free(secnfs_dif_buf);
++	if (is_encrypted) gsh_free(pd_buf);
++	gsh_free(pi_buf);
++	gsh_free(secnfs_dif_buf);
+ 
+-        return st;
++	return st;
+ }
+ 
+ 
+@@ -495,7 +531,8 @@ secnfs_s secnfs_fill_zero(struct secnfs_fsal_obj_handle *hdl,
+                                       size,
+                                       buffer + write_amount % buffer_size,
+                                       &n,
+-                                      &stable);
++                                      &stable,
++                                      false);
+                 if (FSAL_IS_ERROR(st)) {
+                         SECNFS_ERR("hdl = %x; filling zero failed at %u",
+                                    hdl, left_down + write_amount);
+@@ -555,9 +592,9 @@ fsal_status_t secnfs_read(struct fsal_obj_handle *obj_hdl,
+                                               buffer_size, buffer,
+                                               read_amount, end_of_file);
+         }
+-        assert(hdl->key_initialized);
++        assert(secnfs_is_key_initialized(hdl));
+ 
+-        /* skip unnecessary read */
++	/* skip unnecessary read */
+         if (offset >= get_filesize(hdl)) {
+                 *read_amount = 0;
+                 *end_of_file = 1;
+@@ -684,6 +721,44 @@ secnfs_s prepare_aligned_buffer(struct secnfs_fsal_obj_handle *hdl,
+         return SECNFS_OKAY;
+ }
+ 
++/**
++ * Check whether the header is created; if not, mark the intention to create
++ * the header by setting the SECNFS_FLAG_HEADER_CREATED flag.
++ *
++ * @params[in]: create   If yes, also create and write the header after marking
++ * the intention.
++ * 
++ * Return wheter the header was already created before this function.
++ */
++static bool ensure_header(struct secnfs_fsal_obj_handle *hdl, bool create)
++{
++        bool already_created;
++        uint32_t flags, new_flags;
++
++        /* There may be multiple threads trying to create the header at the
++         * same time.  We allow only one thread to create the header and set
++         * the flag.  At this moment, the header is not really created yet, and
++         * the thread that successfully sets the flag is responsible for
++         * creating the header and reporting error if failed to do so.
++         */
++	flags = __sync_or_and_fetch(&hdl->flags, 0);
++	while ((flags & SECNFS_FLAG_HEADER_CREATED) == 0) {
++		new_flags = __sync_val_compare_and_swap(
++		    &hdl->flags, flags, (flags | SECNFS_FLAG_HEADER_CREATED));
++		if (flags == new_flags) {
++			break;          /* successfully set the flag */
++		}
++		flags = new_flags;      /* retry with the new value */
++	}
++        already_created = flags & SECNFS_FLAG_HEADER_CREATED;
++
++	/* We write the header if it is not created yet */
++        if (!already_created && create) {
++                write_header(hdl);
++        }
++
++        return already_created;
++}
+ 
+ /* secnfs_write
+  * concurrency (locks) is managed in cache_inode_*
+@@ -702,6 +777,7 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+         fsal_status_t st;
+         secnfs_s ret;
+         bool align;
++        bool header_already_created, prepend_header = false;
+ 
+         SECNFS_D("hdl = %x; write to %u (%u)\n", hdl, offset, buffer_size);
+ 
+@@ -715,7 +791,6 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+                                                write_amount,
+                                                fsal_stable);
+         }
+-        assert(hdl->key_initialized);
+ 
+         if (buffer_size == 0)
+                 return fsalstat(ERR_FSAL_NO_ERROR, 0);
+@@ -727,6 +802,19 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+         SECNFS_D("hdl = %x; offset_align = %u, size_align = %u",
+                  hdl, offset_align, size_align);
+ 
++        header_already_created = ensure_header(hdl, false);
++	/* We write the header if it is not created yet */
++        if (!header_already_created) {
++                if (offset_align == 0) {
++                        /* As an optimization of reducing network round trips,
++                         * we write header together with the data if we are
++                         * writing at the begining of the file. */
++                        prepend_header = true;
++                } else {
++                        write_header(hdl);
++                }
++        }
++
+         size_align_lock = secnfs_range_try_lock(hdl->range_lock,
+                                                 offset_align, size_align);
+         if (!size_align_lock) {
+@@ -752,9 +840,9 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+                 }
+         }
+ 
+-        st = do_aligned_write(hdl, offset_align, size_align_lock,
+-                              plain_align, write_amount, fsal_stable);
+-        if (FSAL_IS_ERROR(st))
++	st = do_aligned_write(hdl, offset_align, size_align_lock, plain_align,
++			      write_amount, fsal_stable, prepend_header);
++	if (FSAL_IS_ERROR(st))
+                 goto out;
+         if (*write_amount == 0) {
+                 SECNFS_D("hdl = %x; write_amount = 0\n", hdl);
+@@ -764,7 +852,7 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+         PTHREAD_RWLOCK_wrlock(&obj_hdl->lock);
+ 
+         if (secnfs_hole_remove(hdl->holes, offset_align, *write_amount))
+-                hdl->has_dirty_meta = 1;
++                __sync_or_and_fetch(&hdl->flags, SECNFS_FLAG_HAS_DIRTY_META);
+ 
+         /* get effective write_amount */
+         *write_amount = (*write_amount == size_align) ?
+@@ -779,8 +867,9 @@ fsal_status_t secnfs_write(struct fsal_obj_handle *obj_hdl,
+                                  filesize_up, offset_align - filesize_up);
+                         secnfs_hole_add(hdl->holes, filesize_up,
+                                         offset_align - filesize_up);
+-                        hdl->has_dirty_meta = 1;
+-                }
++			__sync_or_and_fetch(&hdl->flags,
++					    SECNFS_FLAG_HAS_DIRTY_META);
++		}
+                 update_filesize(hdl, offset + *write_amount);
+         }
+ 
+@@ -818,7 +907,7 @@ fsal_status_t secnfs_truncate(struct fsal_obj_handle *obj_hdl,
+         newsize_up = pi_round_up(newsize);
+         if (newsize != newsize_up) {
+                 /* If newsize not aligned, explicitly fill zero for last
+-                 * block, since our file hole must be aligned. */ 
++                 * block, since file holes must be aligned because of DIX. */ 
+                 ret = secnfs_fill_zero(hdl, newsize, newsize_up);
+                 if (ret != SECNFS_OKAY)
+                         return secnfs_to_fsal_status(ret);
+@@ -829,9 +918,11 @@ fsal_status_t secnfs_truncate(struct fsal_obj_handle *obj_hdl,
+         if (newsize < filesize_up) {
+                 /* note that explicit zero padding is not counted as hole */
+                 if (secnfs_hole_remove(hdl->holes, newsize_down,
+-                                       filesize_up - newsize_down))
+-                        hdl->has_dirty_meta = 1;
+-        } else if (newsize_down - filesize_up >= PI_INTERVAL_SIZE) {
++                                       filesize_up - newsize_down)) {
++			__sync_or_and_fetch(&hdl->flags,
++					    SECNFS_FLAG_HAS_DIRTY_META);
++		}
++	} else if (newsize_down - filesize_up >= PI_INTERVAL_SIZE) {
+                 secnfs_hole_add(hdl->holes, filesize_up,
+                                 newsize_down - filesize_up);
+         }
+@@ -882,13 +973,14 @@ fsal_status_t secnfs_close(struct fsal_obj_handle *obj_hdl)
+ 
+         __sync_fetch_and_add(&sn_counters.nr_closes, 1);
+ 
+-        if (obj_hdl->type == REGULAR_FILE && hdl->has_dirty_meta) {
+-                fsal_status_t st;
++	if (obj_hdl->type == REGULAR_FILE && secnfs_has_dirty_meta(hdl)) {
++		fsal_status_t st;
+ 
+                 SECNFS_D("Closing hdl = %x; writing header (filesize: %u)",
+                          hdl, get_filesize(hdl));
+ 
+-                st = write_header(obj_hdl);
++                ensure_header(hdl, false);
++                st = write_header(hdl);
+ 
+                 if (FSAL_IS_ERROR(st)) {
+                         /* when unlink a pinned file, fsal_close will not be
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
+index 72b00b3..4984435 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/handle.c
+@@ -142,12 +142,12 @@ static fsal_status_t make_handle_from_next(struct fsal_export *exp,
+ 
+                 if (next_hdl->attributes.filesize > 0) {
+                         SECNFS_D("hdl = %x; reading header\n", secnfs_hdl);
+-                        st = read_header(*handle);
++                        st = read_header(secnfs_hdl);
+                         if (FSAL_IS_ERROR(st))
+                                 goto err;
+-                        SECNFS_D("hdl = %x; file encrypted: %d\n",
+-                                 secnfs_hdl, secnfs_hdl->encrypted);
+-                }
++			SECNFS_D("hdl = %x; file encrypted: %d\n", secnfs_hdl,
++				 secnfs_is_encrypted(secnfs_hdl));
++		}
+         }
+ 
+         return fsalstat(ERR_FSAL_NO_ERROR, 0);
+@@ -176,14 +176,13 @@ static fsal_status_t lookup(struct fsal_obj_handle *parent,
+ }
+ 
+ 
+-fsal_status_t read_header(struct fsal_obj_handle *fsal_hdl)
++fsal_status_t read_header(struct secnfs_fsal_obj_handle *hdl)
+ {
+-        struct secnfs_fsal_obj_handle *hdl = secnfs_handle(fsal_hdl);
+         fsal_status_t st;
+         void *buf;
+         uint32_t buf_size, header_len;
+         size_t n, read_amount = 0;
+-        bool end_of_file = false;
++        bool is_encrypted, end_of_file = false;
+         uint64_t filesize;
+         secnfs_s ret;
+ 
+@@ -220,15 +219,18 @@ fsal_status_t read_header(struct fsal_obj_handle *fsal_hdl)
+                                  &hdl->fk,
+                                  &hdl->iv,
+                                  &filesize,
+-                                 &hdl->encrypted,
++                                 &is_encrypted,
+                                  hdl->holes,
+                                  &header_len,
+                                  &hdl->kf_cache);
+         assert(ret == SECNFS_OKAY);
++        if (is_encrypted) {
++		__sync_or_and_fetch(&hdl->flags, SECNFS_FLAG_ENCRYPTED);
++	}
+ 
+-        fsal_hdl->attributes.filesize = filesize;
++        hdl->obj_handle.attributes.filesize = filesize;
+ 
+-        hdl->key_initialized = 1;
++        __sync_or_and_fetch(&hdl->flags, SECNFS_FLAG_KEY_INITIALIZED);
+ 
+ out:
+         gsh_free(buf);
+@@ -236,9 +238,8 @@ out:
+ }
+ 
+ 
+-fsal_status_t write_header(struct fsal_obj_handle *fsal_hdl)
++fsal_status_t write_header(struct secnfs_fsal_obj_handle *hdl)
+ {
+-        struct secnfs_fsal_obj_handle *hdl = secnfs_handle(fsal_hdl);
+         fsal_status_t st;
+         uint32_t buf_size;
+         size_t n, write_amount = 0;
+@@ -246,14 +247,12 @@ fsal_status_t write_header(struct fsal_obj_handle *fsal_hdl)
+         int ret;
+         bool stable;
+ 
+-        ret = secnfs_create_header(hdl->info, &hdl->fk, &hdl->iv,
+-                                   get_filesize(hdl),
+-                                   hdl->encrypted,
+-                                   hdl->holes,
+-                                   &buf, &buf_size, &hdl->kf_cache);
++	ret = secnfs_create_header(hdl->info, &hdl->fk, &hdl->iv,
++				   get_filesize(hdl), secnfs_is_encrypted(hdl),
++				   hdl->holes, &buf, &buf_size, &hdl->kf_cache);
+ 
+-        assert(ret == SECNFS_OKAY);
+-        assert(buf_size == FILE_HEADER_SIZE);
++	assert(ret == SECNFS_OKAY);
++	assert(buf_size == FILE_HEADER_SIZE);
+ 
+         hdl->data_offset = buf_size;
+ 
+@@ -271,17 +270,16 @@ fsal_status_t write_header(struct fsal_obj_handle *fsal_hdl)
+                 write_amount += n;
+         } while (write_amount < buf_size);
+ 
+-        hdl->has_dirty_meta = 0;
++        __sync_fetch_and_and(&hdl->flags, ~SECNFS_FLAG_HAS_DIRTY_META);
+ 
+ out:
+         free(buf);
+         return st;
+ }
+ 
+-
+-static fsal_status_t create(struct fsal_obj_handle *dir_hdl,
+-                            const char *name, struct attrlist *attrib,
+-                            struct fsal_obj_handle **handle)
++static fsal_status_t secnfs_create(struct fsal_obj_handle *dir_hdl,
++				   const char *name, struct attrlist *attrib,
++				   struct fsal_obj_handle **handle)
+ {
+         struct secnfs_fsal_obj_handle *hdl = secnfs_handle(dir_hdl);
+         struct fsal_obj_handle *next_hdl;
+@@ -306,12 +304,17 @@ static fsal_status_t create(struct fsal_obj_handle *dir_hdl,
+         if (attrib->type == REGULAR_FILE) {
+                 new_hdl = secnfs_handle(*handle);
+                 generate_key_and_iv(&new_hdl->fk, &new_hdl->iv);
+-                new_hdl->key_initialized = 1;
+-                new_hdl->has_dirty_meta = 0;
+-                new_hdl->encrypted = new_hdl->info->file_encryption;
+-                SECNFS_D("key in new handle (%x) initialized; encryption %s",
+-                         new_hdl, new_hdl->encrypted ? "enabled" : "disabled");
+-                st = write_header(*handle);
++                uint64_t flags = SECNFS_FLAG_KEY_INITIALIZED;
++		if (new_hdl->info->file_encryption) {
++			flags |= SECNFS_FLAG_ENCRYPTED;
++		}
++		if (!__sync_bool_compare_and_swap(&new_hdl->flags,
++						  new_hdl->flags, flags)) {
++			LogCrit(COMPONENT_FSAL, "no other thread should touch "
++						"the flags during file "
++						"creation");
++                        return fsalstat(ERR_FSAL_SERVERFAULT, 0);
++		}
+         }
+ 
+         return st;
+@@ -413,8 +416,8 @@ static fsal_status_t getattrs(struct fsal_obj_handle *obj_hdl)
+ /*
+  * NOTE: this is done under protection of the attributes rwlock in the cache entry.
+  */
+-static fsal_status_t setattrs(struct fsal_obj_handle *obj_hdl,
+-			      struct attrlist *attrs)
++static fsal_status_t secnfs_setattrs(struct fsal_obj_handle *obj_hdl,
++				     struct attrlist *attrs)
+ {
+ 	__sync_fetch_and_add(&sn_counters.nr_setattrs, 1);
+         if (attrs->mask & ATTR_SIZE && obj_hdl->type == REGULAR_FILE) {
+@@ -503,14 +506,14 @@ void secnfs_handle_ops_init(struct fsal_obj_ops *ops)
+ 	ops->release = release;
+ 	ops->lookup = lookup;
+ 	ops->readdir = read_dirents;
+-	ops->create = create;
++	ops->create = secnfs_create;
+ 	ops->mkdir = makedir;
+ 	ops->mknode = makenode;
+ 	ops->symlink = makesymlink;
+ 	ops->readlink = readsymlink;
+ 	ops->test_access = fsal_test_access;
+ 	ops->getattrs = getattrs;
+-	ops->setattrs = setattrs;
++	ops->setattrs = secnfs_setattrs;
+ 	ops->link = linkfile;
+ 	ops->rename = renamefile;
+ 	ops->unlink = file_unlink;
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.cpp b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.cpp
+index 6d7ca2f..f069520 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.cpp
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.cpp
+@@ -536,9 +536,9 @@ secnfs_s secnfs_create_header(secnfs_info_t *info,
+         header.set_allocated_keyfile(kf);
+ 
+         if (!kf->has_creator()) { // check cache
+-                ctx->GenerateKeyFile(fek->bytes, iv->bytes,
+-                                SECNFS_KEY_LENGTH, kf);
+-                kf->set_creator(ctx->name());
++		ctx->GenerateKeyFile(fek->bytes, iv->bytes, SECNFS_KEY_LENGTH,
++				     kf);
++		kf->set_creator(ctx->name());
+         }
+         // TODO handle header version
+ 
+@@ -564,6 +564,55 @@ out:
+ }
+ 
+ 
++secnfs_s secnfs_create_header_in_buffer(secnfs_info_t *info,
++                                        secnfs_key_t *fek,
++                                        secnfs_key_t *iv,
++                                        uint64_t filesize,
++                                        bool encrypted,
++                                        void *holes,
++                                        void *buf,
++                                        uint32_t len,
++                                        void **kf_cache)
++{
++        Context *ctx = get_context(info);
++        FileHeader header;
++        KeyFile *kf;
++        secnfs_s ret;
++
++        kf = static_cast<KeyFile *>(*kf_cache);
++        if (!kf) {
++                kf = new KeyFile;
++                *kf_cache = kf;
++        }
++        header.set_allocated_keyfile(kf);
++
++        if (!kf->has_creator()) { // check cache
++		ctx->GenerateKeyFile(fek->bytes, iv->bytes, SECNFS_KEY_LENGTH,
++				     kf);
++		kf->set_creator(ctx->name());
++        }
++
++        ret = create_meta(header, fek, iv, filesize, encrypted, holes);
++        if (ret != SECNFS_OKAY) {
++                LOG(ERROR) << "create meta failed";
++                goto out;
++        }
++
++	if (!EncodeMessageIntoBuffer(header, buf, len, FILE_HEADER_SIZE)) {
++		LOG(ERROR) << "cannot write keyfile";
++                ret = SECNFS_WRONG_CONFIG;
++                goto out;
++        }
++
++        ret = SECNFS_OKAY;
++
++out:
++        header.release_keyfile(); /* avoid cleanup by header's destructor */
++
++        return ret;
++}
++
++
+ secnfs_s secnfs_read_header(secnfs_info_t *info,
+                             void *buf,
+                             uint32_t buf_size,
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.h b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.h
+index fbf91c8..6fd4e10 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.h
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs.h
+@@ -260,6 +260,35 @@ secnfs_s secnfs_create_header(secnfs_info_t *info,
+ 
+ 
+ /**
++ * @brief Create new file header.
++ *
++ * @param[in]   context         SECNFS Context
++ * @param[in]   fek             File Encryption Key
++ * @param[in]   iv              Initialization vector
++ * @param[in]   filesize        effective file size
++ * @param[in]   encrypted       whether file content is encrypted
++ * @param[in]   holes           blockmap pointer to file holes
++ * @param[in]   buf             buffer for holding header data
++ * @param[in]   len             Length of header buffer
++ * @param[in/out]  kf_cache     keyfile cache pointer
++ *
++ * If kf_cache is presented, header will reuse the cached keyfile.
++ * If not, kf_cache will point to the new keyfile.
++ *
++ * @return SECNFS_OKAY on success.
++ */
++secnfs_s secnfs_create_header_in_buffer(secnfs_info_t *info,
++                                        secnfs_key_t *fek,
++                                        secnfs_key_t *iv,
++                                        uint64_t filesize,
++                                        bool encrypted,
++                                        void *holes,
++                                        void *buf,
++                                        uint32_t len,
++                                        void **kf_cache);
++
++
++/**
+  * Read and decrypt file encryption key, meta data from file header.
+  *
+  * @param[in]   info        secnfs info, containing the context
+diff --git a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs_methods.h b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs_methods.h
+index 7c8ba64..c1b6319 100644
+--- a/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs_methods.h
++++ b/src/FSAL/Stackable_FSALs/FSAL_SECNFS/secnfs_methods.h
+@@ -46,6 +46,11 @@ fsal_status_t secnfs_create_handle(struct fsal_export *exp_hdl,
+ 				   struct gsh_buffdesc *hdl_desc,
+ 				   struct fsal_obj_handle **handle);
+ 
++#define SECNFS_FLAG_KEY_INITIALIZED 0X1
++#define SECNFS_FLAG_ENCRYPTED       0X2
++#define SECNFS_FLAG_HEADER_CREATED  0X4
++#define SECNFS_FLAG_HAS_DIRTY_META  0X8
++
+ /*
+  * SECNFS internal object handle
+  *
+@@ -59,14 +64,33 @@ struct secnfs_fsal_obj_handle {
+         secnfs_info_t *info;                    /*< secnfs info */
+         /* NFSv4.2' support for sparse file will help us */
+         uint32_t data_offset;                   /*< beginning of data file */
+-        uint32_t key_initialized;
+-        uint32_t has_dirty_meta;                /*< need to update header? */
+         void *range_lock;
+         void *holes;
+         void *kf_cache;                         /* cached keyfile */
+-        bool encrypted;
++        uint32_t flags;                         /* SECNFS_FLAG_* flags */
+ };
+ 
++static inline bool secnfs_is_key_initialized(struct secnfs_fsal_obj_handle *hdl)
++{
++	return __sync_fetch_and_or(&hdl->flags, 0) &
++	       SECNFS_FLAG_KEY_INITIALIZED;
++}
++
++static inline bool secnfs_is_encrypted(struct secnfs_fsal_obj_handle *hdl)
++{
++	return __sync_fetch_and_or(&hdl->flags, 0) & SECNFS_FLAG_ENCRYPTED;
++}
++
++static inline bool secnfs_is_header_created(struct secnfs_fsal_obj_handle *hdl)
++{
++	return __sync_fetch_and_or(&hdl->flags, 0) & SECNFS_FLAG_HEADER_CREATED;
++}
++
++static inline bool secnfs_has_dirty_meta(struct secnfs_fsal_obj_handle *hdl)
++{
++	return __sync_fetch_and_or(&hdl->flags, 0) & SECNFS_FLAG_HAS_DIRTY_META;
++}
++
+ struct secnfs_counters {
+ 	uint32_t nr_creates;
+ 	uint32_t nr_opens;
+@@ -136,7 +160,7 @@ static inline void update_filesize(struct secnfs_fsal_obj_handle *hdl,
+ {
+         if (s != hdl->obj_handle.attributes.filesize) {
+                 hdl->obj_handle.attributes.filesize = s;
+-                hdl->has_dirty_meta = 1;
++                __sync_or_and_fetch(&hdl->flags, SECNFS_FLAG_HAS_DIRTY_META);
+         }
+ }
+ 
+@@ -153,9 +177,9 @@ static inline bool secnfs_unopenable_type(object_file_type_t type)
+ 	}
+ }
+ 
+-fsal_status_t read_header(struct fsal_obj_handle *fsal_hdl);
++fsal_status_t read_header(struct secnfs_fsal_obj_handle *hdl);
+ 
+-fsal_status_t write_header(struct fsal_obj_handle *fsal_hdl);
++fsal_status_t write_header(struct secnfs_fsal_obj_handle *hdl);
+ 
+ 	/* I/O management */
+ fsal_status_t secnfs_open(struct fsal_obj_handle * obj_hdl,
+diff --git a/src/libntirpc b/src/libntirpc
+index f5bd35f..8e2fb0e 160000
+--- a/src/libntirpc
++++ b/src/libntirpc
+@@ -1 +1 @@
+-Subproject commit f5bd35f32f3475c50238b652334c7d848c742d2e
++Subproject commit 8e2fb0e8b5bdc76146351bd01f9ddd9ccf226b8d

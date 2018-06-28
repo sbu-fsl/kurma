@@ -1,0 +1,40 @@
+#!/bin/bash
+# Please install this into your repository:
+#   cp git-pre-commit-fsl <gitroot>/.git/hooks/pre-commit
+
+if git rev-parse --verify HEAD 2>/dev/null >/dev/null
+then
+	against=HEAD
+else
+	# Initial commit: diff against an empty tree object
+	against=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+fi
+
+topdir=$(git rev-parse --show-toplevel)
+
+files=$(git diff --name-only --cached | grep '\.h\|\.cpp')
+
+cppdirs=(src/secnfs src/FSAL/Stackable_FSALs/FSAL_SECNFS/integrity)
+
+function is_cpp() {
+	for file in $files; do
+		dir=$(dirname $file)
+		for cppdir in ${cppdirs[*]}; do
+			if [[ $dir == $cppdir* ]]; then
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+if [ -z "$files" ]; then
+	exit 0
+fi
+
+if is_cpp; then
+	$topdir/secnfs/cpplint.py $files
+else
+	exec git diff --cached $against | $topdir/src/scripts/checkpatch.pl \
+		      --no-signoff -q -
+fi

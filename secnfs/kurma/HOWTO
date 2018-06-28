@@ -1,0 +1,33 @@
+0. Prerequisites
+
+- Install libraries using ./install-kurma-server.sh
+
+- Install ZooKeeper, BookKeeper, and Hedwig using ./install-zk-bk-hw.sh
+
+1. Launch the Kurma FS daemon
+
+- Make sure thrift, Java 8, and maven are installed
+
+- Check out the kurma branch of fsl-nfs-ganesha
+
+- Generate Thrift source file by running src/secnfs/proto/gen.sh
+
+- Go to the root of the fsl-nfs-ganesha and run "mvn compile"
+
+- Set up zookeeper (running at "localhost:2181" by default)
+
+- Start Kurma server daemon by running java/scripts/startserver.sh
+
+- If not yet, run python/prototest/testkurma.py to create a volume
+
+2. Launch the Kurma FSAL Ganesha server (on a different machine)
+
+- Check out the fsal_kurma branch of fsl-nfs-ganesha
+
+- Run secnfs/build-kurma.sh
+
+- Deploy fsal_kurma config file
+
+  cp secnfs/conf/kurma.ganesha.conf /etc/ganesha/
+
+- Copy secnfs/run-kurma.sh to cmake build directory and run

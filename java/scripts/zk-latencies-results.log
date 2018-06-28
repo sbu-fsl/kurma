@@ -1,0 +1,35 @@
+#PYTHONPATH=/root/hedwig/zookeeper-3.4.6/build/contrib/zkpython/lib.linux-x86_64-2.7/ LD_LIBRARY_PATH=/root/hedwig/zookeeper-3.4.6/build/contrib/zkpython/lib.linux-x86_64-2.7/:/usr/local/lib ./zk-latencies.py --servers="130.245.177.111:2181,130.245.177.112:2181,130.245.177.113:2181" --znode_count=100 --znode_size=100 --synchronous
+Connecting to 130.245.177.111:2181
+Connected in 5 ms, handle is 0
+Connecting to 130.245.177.112:2181
+Connected in 7 ms, handle is 1
+Connecting to 130.245.177.113:2181
+Connected in 16 ms, handle is 2
+Testing latencies on server 130.245.177.111:2181 using syncronous calls
+created     100 permanent znodes  in    165 ms (1.655881 ms/op 603.907983/sec)
+set         100           znodes  in    165 ms (1.659319 ms/op 602.656728/sec)
+get         100           znodes  in     12 ms (0.125060 ms/op 7996.156632/sec)
+deleted     100 permanent znodes  in    185 ms (1.850321 ms/op 540.446680/sec)
+created     100 ephemeral znodes  in    177 ms (1.770751 ms/op 564.731987/sec)
+watched     100           znodes  in     14 ms (0.140121 ms/op 7136.689864/sec)
+deleted     100 ephemeral znodes  in    191 ms (1.915090 ms/op 522.168648/sec)
+notif       100           watches in   1001 ms (10.011110 ms/op 99.889020/sec)
+Testing latencies on server 130.245.177.112:2181 using syncronous calls
+created     100 permanent znodes  in    226 ms (2.264049 ms/op 441.686543/sec)
+set         100           znodes  in    225 ms (2.256830 ms/op 443.099443/sec)
+get         100           znodes  in     59 ms (0.590401 ms/op 1693.764942/sec)
+deleted     100 permanent znodes  in    225 ms (2.252040 ms/op 444.041864/sec)
+created     100 ephemeral znodes  in    227 ms (2.277679 ms/op 439.043344/sec)
+watched     100           znodes  in     52 ms (0.526781 ms/op 1898.321777/sec)
+deleted     100 ephemeral znodes  in    233 ms (2.330801 ms/op 429.036967/sec)
+notif       100           watches in   1001 ms (10.011139 ms/op 99.888735/sec)
+Testing latencies on server 130.245.177.113:2181 using syncronous calls
+created     100 permanent znodes  in    157 ms (1.579318 ms/op 633.184685/sec)
+set         100           znodes  in    151 ms (1.516440 ms/op 659.439250/sec)
+get         100           znodes  in     49 ms (0.490289 ms/op 2039.614476/sec)
+deleted     100 permanent znodes  in    160 ms (1.608980 ms/op 621.511880/sec)
+created     100 ephemeral znodes  in    160 ms (1.609960 ms/op 621.133598/sec)
+watched     100           znodes  in     62 ms (0.623369 ms/op 1604.185726/sec)
+deleted     100 ephemeral znodes  in    165 ms (1.654000 ms/op 604.594818/sec)
+notif       100           watches in   1001 ms (10.011029 ms/op 99.889829/sec)
+Latency test complete

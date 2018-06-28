@@ -1,0 +1,185 @@
+diff --git a/.gitmodules b/.gitmodules
+index 21df7e2..0f1005b 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,4 +1,4 @@
+ [submodule "src/libntirpc"]
+ 	path = src/libntirpc
+ 	url = https://github.com/nfs-ganesha/ntirpc.git 
+-
++	ignore = dirty
+diff --git a/secnfs/config/sec_vs_cache.ganesha.conf b/secnfs/config/sec_vs_cache.ganesha.conf
+index 891566f..7374b7a 100644
+--- a/secnfs/config/sec_vs_cache.ganesha.conf
++++ b/secnfs/config/sec_vs_cache.ganesha.conf
+@@ -345,7 +345,8 @@ NFSv4
+ 
+ PROXY {
+   remote_server {
+-    Srv_Addr = "130.245.177.235";
++#Srv_Addr = "130.245.177.235";
++   Srv_Addr = "130.245.126.233";
+ 
+ #WARNING/!\  Small NFS_SendSize and NFS_RecvSize may lead to problems
+ #NFS_SendSizeshould be larger than MaxWrite and MaxRead
+@@ -407,6 +408,7 @@ EXPORT
+   #}
+ 
+   Pseudo = /vfs-ganesha;
++  #Pseudo = /vfs0;
+ 
+   #Cache_Data = FALSE ;
+ 
+diff --git a/src/FSAL/FSAL_PROXY/handle.c b/src/FSAL/FSAL_PROXY/handle.c
+index 7399066..7bdc466 100644
+--- a/src/FSAL/FSAL_PROXY/handle.c
++++ b/src/FSAL/FSAL_PROXY/handle.c
+@@ -1856,6 +1856,49 @@ static fsal_status_t pxy_getattrs(struct fsal_obj_handle *obj_hdl)
+ 	return st;
+ }
+ 
++static fsal_status_t pxy_getattrs_plus(struct fsal_obj_handle *obj_hdl,
++				       size_t header_size, void *header,
++				       size_t *read_amount)
++{
++	struct pxy_obj_handle *ph;
++	struct attrlist obj_attr = {0};
++	int rc;
++	uint32_t opcnt = 0;
++#define FSAL_GETATTR_PLUS_NB_OP_ALLOC 3
++	nfs_argop4 argoparray[FSAL_GETATTR_PLUS_NB_OP_ALLOC];
++	nfs_resop4 resoparray[FSAL_GETATTR_PLUS_NB_OP_ALLOC];
++	GETATTR4resok *atok;
++	READ4resok *rok;
++	char fattr_blob[FATTR_BLOB_SZ];
++
++	__sync_fetch_and_add(&pxy_counters.nr_getattrsplus, 1);
++
++	ph = container_of(obj_hdl, struct pxy_obj_handle, obj);
++	COMPOUNDV4_ARG_ADD_OP_PUTFH(opcnt, argoparray, ph->fh4);
++
++	atok = pxy_fill_getattr_reply(resoparray + opcnt, fattr_blob,
++				      sizeof(fattr_blob));
++	COMPOUNDV4_ARG_ADD_OP_GETATTR(opcnt, argoparray, pxy_bitmap_getattr);
++
++	rok = &resoparray[opcnt].nfs_resop4_u.opread.READ4res_u.resok4;
++	rok->data.data_val = header;
++	rok->data.data_len = header_size;
++	COMPOUNDV4_ARG_ADD_OP_READ(opcnt, argoparray, 0, header_size);
++
++	rc = pxy_nfsv4_call(op_ctx->fsal_export, op_ctx->creds, opcnt,
++			    argoparray, resoparray);
++	if (rc != NFS4_OK)
++		return nfsstat4_to_fsal(rc);
++
++	if (nfs4_Fattr_To_FSAL_attr(&obj_attr, &atok->obj_attributes, NULL) !=
++	    NFS4_OK)
++		return fsalstat(ERR_FSAL_INVAL, 0);
++
++	*read_amount = rok->data.data_len;
++
++	return fsalstat(ERR_FSAL_NO_ERROR, 0);
++}
++
+ /*
+  * Couple of things to note:
+  * 1. We assume that checks for things like cansettime are done
+diff --git a/src/FSAL/FSAL_PROXY/proxy.c b/src/FSAL/FSAL_PROXY/proxy.c
+index b78ed67..df54bf0 100644
+--- a/src/FSAL/FSAL_PROXY/proxy.c
++++ b/src/FSAL/FSAL_PROXY/proxy.c
+@@ -210,13 +210,14 @@ static void *output_pxy_counters(void *arg)
+ 	while (__sync_fetch_and_or(&pxy_counter_running, 0)) {
+ 		n = snprintf(
+ 		    buf, 1024, "%d %lld %d %d %d %d %d %d %d %d %d %d %d %d "
+-			       "%d %d %d %d %d %d %d\n",
++			       "%d %d %d %d %d %d %d %d\n",
+ 		    __sync_fetch_and_or(&pxy_counters.nr_rpcs, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_rpc_ms, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_creates, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_createplus, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_opens, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_getattrs, 0),
++		    __sync_fetch_and_or(&pxy_counters.nr_getattrsplus, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_setattrs, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_lookups, 0),
+ 		    __sync_fetch_and_or(&pxy_counters.nr_mkdirs, 0),
+diff --git a/src/FSAL/FSAL_PROXY/pxy_fsal_methods.h b/src/FSAL/FSAL_PROXY/pxy_fsal_methods.h
+index 18256c4..6085fba 100644
+--- a/src/FSAL/FSAL_PROXY/pxy_fsal_methods.h
++++ b/src/FSAL/FSAL_PROXY/pxy_fsal_methods.h
+@@ -67,6 +67,8 @@ struct pxy_counters {
+ 	uint32_t nr_renames;
+ 	uint32_t nr_closes;
+ 
++	uint32_t nr_getattrsplus;
++
+ 	uint32_t nr_rpcs;
+ 	int64_t nr_rpc_ms;
+ 
+diff --git a/src/FSAL/default_methods.c b/src/FSAL/default_methods.c
+index d4e4ce4..1962b42 100644
+--- a/src/FSAL/default_methods.c
++++ b/src/FSAL/default_methods.c
+@@ -819,6 +819,17 @@ static fsal_status_t file_create_plus(struct fsal_obj_handle *obj_hdl,
+ 	return fsalstat(ERR_FSAL_NOTSUPP, 0);
+ }
+ 
++/*
++ * default case not supported
++ */
++static fsal_status_t file_getattrs_plus(struct fsal_obj_handle *obj_hdl,
++					size_t header_size,
++					void *header,
++					size_t *read_amount)
++{
++	return fsalstat(ERR_FSAL_NOTSUPP, 0);
++}
++
+ /* list_ext_attrs
+  * default case not supported
+  */
+@@ -1071,6 +1082,7 @@ struct fsal_obj_ops def_handle_ops = {
+ 	.layoutreturn = layoutreturn,
+ 	.layoutcommit = layoutcommit,
+ 	.create_plus = file_create_plus,
++	.getattrs_plus = file_getattrs_plus,
+ };
+ 
+ /* fsal_ds_handle common methods */
+diff --git a/src/include/fsal_api.h b/src/include/fsal_api.h
+index aa0057b..fa63d5b 100644
+--- a/src/include/fsal_api.h
++++ b/src/include/fsal_api.h
+@@ -2078,6 +2078,24 @@ struct fsal_obj_ops {
+ 				      size_t *wrote_amount);
+ 
+ /**
++ * @brief Get attributes
++ *
++ * This function freshens the cached attributes stored on the handle.
++ * Since the caller can take the attribute lock and read them off the
++ * public filehandle, they are not copied out.
++ *
++ * In addition, it can read a header of the underlying file.
++ *
++ * @param[in]  obj_hdl  Object to query
++ *
++ * @return FSAL status.
++ */
++	 fsal_status_t(*getattrs_plus) (struct fsal_obj_handle *obj_hdl,
++					size_t header_size,
++					void *header,
++					size_t *read_amount);
++
++/**
+  * @brief Open a file for read or write.
+  *
+  * This function opens a file for read or write, and optionally perform an
+diff --git a/src/libntirpc b/src/libntirpc
+index f5bd35f..8e2fb0e 160000
+--- a/src/libntirpc
++++ b/src/libntirpc
+@@ -1 +1 @@
+-Subproject commit f5bd35f32f3475c50238b652334c7d848c742d2e
++Subproject commit 8e2fb0e8b5bdc76146351bd01f9ddd9ccf226b8d

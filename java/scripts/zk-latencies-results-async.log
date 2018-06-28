@@ -1,0 +1,35 @@
+#PYTHONPATH=/root/hedwig/zookeeper-3.4.6/build/contrib/zkpython/lib.linux-x86_64-2.7/ LD_LIBRARY_PATH=/root/hedwig/zookeeper-3.4.6/build/contrib/zkpython/lib.linux-x86_64-2.7/:/usr/local/lib ./zk-latencies.py --servers="130.245.177.111:2181,130.245.177.112:2181,130.245.177.113:2181" --znode_count=1000 --znode_size=100
+Connecting to 130.245.177.111:2181
+Connected in 16 ms, handle is 0
+Connecting to 130.245.177.112:2181
+Connected in 7 ms, handle is 1
+Connecting to 130.245.177.113:2181
+Connected in 7 ms, handle is 2
+Testing latencies on server 130.245.177.111:2181 using asynchronous calls
+created    1000 permanent znodes  in    498 ms (0.498694 ms/op 2005.236951/sec)
+set        1000           znodes  in    384 ms (0.384574 ms/op 2600.280220/sec)
+get        1000           znodes  in    140 ms (0.140281 ms/op 7128.551058/sec)
+deleted    1000 permanent znodes  in    313 ms (0.313832 ms/op 3186.420179/sec)
+created    1000 ephemeral znodes  in    310 ms (0.310175 ms/op 3223.987062/sec)
+watched    1000           znodes  in     91 ms (0.091919 ms/op 10879.150066/sec)
+deleted    1000 ephemeral znodes  in    247 ms (0.247890 ms/op 4034.047432/sec)
+notif      1000           watches in      0 ms (included in prior)
+Testing latencies on server 130.245.177.112:2181 using asynchronous calls
+created    1000 permanent znodes  in    242 ms (0.242712 ms/op 4120.109076/sec)
+set        1000           znodes  in    243 ms (0.243327 ms/op 4109.693628/sec)
+get        1000           znodes  in    117 ms (0.117455 ms/op 8513.898531/sec)
+deleted    1000 permanent znodes  in    157 ms (0.157622 ms/op 6344.288059/sec)
+created    1000 ephemeral znodes  in    175 ms (0.175975 ms/op 5682.630350/sec)
+watched    1000           znodes  in    175 ms (0.175799 ms/op 5688.310244/sec)
+deleted    1000 ephemeral znodes  in    152 ms (0.152283 ms/op 6566.723186/sec)
+notif      1000           watches in      0 ms (included in prior)
+Testing latencies on server 130.245.177.113:2181 using asynchronous calls
+created    1000 permanent znodes  in    213 ms (0.213509 ms/op 4683.641496/sec)
+set        1000           znodes  in    266 ms (0.266028 ms/op 3759.000469/sec)
+get        1000           znodes  in    227 ms (0.227480 ms/op 4395.992118/sec)
+deleted    1000 permanent znodes  in    191 ms (0.191478 ms/op 5222.531711/sec)
+created    1000 ephemeral znodes  in    256 ms (0.256817 ms/op 3893.821675/sec)
+watched    1000           znodes  in    200 ms (0.200774 ms/op 4980.725727/sec)
+deleted    1000 ephemeral znodes  in    244 ms (0.244521 ms/op 4089.629922/sec)
+notif      1000           watches in      0 ms (included in prior)
+Latency test complete

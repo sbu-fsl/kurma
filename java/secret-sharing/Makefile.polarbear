@@ -1,0 +1,39 @@
+#CFLAGS = -O0 -g -Wall -fno-operator-names -fPIC
+CFLAGS = -O3 -Wall -fno-operator-names -fPIC -DNDEBUG
+
+CC = g++
+LIBS = -lcrypto -lssl -lpthread -lgf_complete \
+       -L/home/mchen/mac/homebrew/opt/openssl/lib \
+       -L/usr/local/lib
+OBJS = CryptoPrimitive.o CDCodec.o secretsharing_CDCodecJNI.o
+JNI_HEADERS_PATH := $(shell /usr/libexec/java_home)/include
+INCLUDES =-I/usr/local/include -I$(JNI_HEADERS_PATH) -I$(JNI_HEADERS_PATH)/darwin \
+	  -I/home/mchen/mac/homebrew/opt/openssl/include/
+
+all: libsecretsharing.a aontrs-test libsecretsharing.jni.dylib
+
+
+secretsharing_CDCodecJNI.h: secretsharing/CDCodecJNI.java
+	javac $< && javah secretsharing.CDCodecJNI
+
+%.o: %.cpp %.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
+
+libsecretsharing.a: $(OBJS)
+	ar rcs $@ $^
+
+libsecretsharing.jni.dylib: $(OBJS)
+	$(CC) $(CFLAGS) -shared -Wl,-install_name,$@  -o $@ $(OBJS) $(LIBS)
+
+aontrs-test: ./main.cc $(OBJS)
+	$(CC) $(CFLAGS) $(INCLUDES) -o aontrs-test ./main.cc $(OBJS) $(LIBS)
+
+.PHONY: install clean
+
+install: libsecretsharing.jni.dylib
+	@cp $< /usr/local/lib
+
+clean:
+	@rm -f libsecretsharing.a aontrs-test libsecretsharing.jni.dylib
+	@rm -f $(OBJS)
+	@rm -f secretsharing/*.class

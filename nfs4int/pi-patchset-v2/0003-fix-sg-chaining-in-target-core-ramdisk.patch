@@ -1,0 +1,68 @@
+--- orig-linux-3.14.54/drivers/target/target_core_rd.c	2015-10-01 05:36:53.000000000 -0400
++++ linux-3.14.54/drivers/target/target_core_rd.c	2015-10-16 12:34:16.692941951 -0400
+@@ -131,6 +131,7 @@
+ 				 u32 total_sg_needed, unsigned char init_payload)
+ {
+ 	u32 i = 0, j, page_offset = 0, sg_per_table;
++	/* FIXME */
+ 	u32 max_sg_per_table = (RD_MAX_ALLOCATION_SIZE /
+ 				sizeof(struct scatterlist));
+ 	struct page *pg;
+@@ -138,10 +139,18 @@
+ 	unsigned char *p;
+ 
+ 	while (total_sg_needed) {
++		unsigned int chain_entry = 0;
++
+ 		sg_per_table = (total_sg_needed > max_sg_per_table) ?
+ 			max_sg_per_table : total_sg_needed;
+ 
+-		sg = kzalloc(sg_per_table * sizeof(struct scatterlist),
++		/*
++		 * Reserve extra element for chain entry
++		 */
++		if (sg_per_table < total_sg_needed)
++			chain_entry = 1;
++
++		sg = kcalloc(sg_per_table + chain_entry, sizeof(*sg),
+ 				GFP_KERNEL);
+ 		if (!sg) {
+ 			pr_err("Unable to allocate scatterlist array"
+@@ -149,7 +158,12 @@
+ 			return -ENOMEM;
+ 		}
+ 
+-		sg_init_table(sg, sg_per_table);
++		sg_init_table(sg, sg_per_table + chain_entry);
++
++		if (i > 0) {
++			sg_chain(sg_table[i - 1].sg_table,
++				 max_sg_per_table + 1, sg);
++		}
+ 
+ 		sg_table[i].sg_table = sg;
+ 		sg_table[i].rd_sg_count = sg_per_table;
+@@ -434,6 +448,23 @@
+ 
+ 		prot_sg = &prot_table->sg_table[prot_page - prot_table->page_start_offset];
+ 
++		if (!prot_sg) {
++			pr_err("prot_sg: %p; prot_offset: %u; prot_page: %u;\n"
++			       "lba offset: %llu; lba sectors: %u;\n"
++			       "data_nents: %u; original data_nents: %u;\n"
++			       "prot_nents: %u; prot_length: %u;\n"
++			       "prot_table: %p; prot_table->sg_table: %p;\n"
++			       "prot_table->page_start_offset: %u\n",
++			       prot_sg, prot_offset, prot_page,
++			       cmd->t_task_lba, cmd->t_task_nolb,
++			       cmd->t_data_nents, cmd->t_data_nents_orig,
++			       cmd->t_prot_nents, cmd->prot_length,
++			       prot_table, prot_table->sg_table,
++			       prot_table->page_start_offset);
++			BUG();
++			return TCM_LOGICAL_UNIT_COMMUNICATION_FAILURE;
++		}
++
+ 		rc = sbc_dif_verify_write(cmd, cmd->t_task_lba, sectors, 0,
+ 					  prot_sg, prot_offset);
+ 		if (rc)

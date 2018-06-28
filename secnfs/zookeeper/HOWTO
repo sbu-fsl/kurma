@@ -1,0 +1,35 @@
+How to Setup 3 Zookeeper node Cluster
+
+We will install a three-server Zookeeper cluster on 3 proxies.
+Each proxy will act as a zookeeper client talking to the cluster.
+
+1. Edit /etc/hosts on each proxy
+
+	192.168.0.1 ProxyA
+	192.168.0.2 ProxyB
+	192.168.0.3 ProxyC
+
+2. Install and start Zookeeper on each proxy
+
+	$ yum install java-1.8.0-openjdk
+	$ wget http://www.us.apache.org/dist/zookeeper/zookeeper-3.4.6/zookeeper-3.4.6.tar.gz
+	$ tar zxvf zookeeper-3.4.6.tar.gz
+	$ cd zookeeper-3.4.6
+	$ cp <fsl-nfs-ganesha>/secnfs/zookeeper/zoo.cfg conf/
+	$ mkdir -pv /var/lib/zookeeper/
+ProxyA	$ echo '1' > /var/lib/zookeeper/myid
+ProxyB	$ echo '2' > /var/lib/zookeeper/myid
+ProxyC	$ echo '3' > /var/lib/zookeeper/myid
+	$ bin/zkServer.sh start-foreground conf/zoo.cfg
+
+3. Install C library and command line client
+
+	$ cd zookeeper-3.4.6/src/c
+	$ ./configure --prefix=/root/soft/zookeeper
+	$ make install
+
+4. Compile SECNFS with Zookeeper
+
+	$ export ZOOKEEPER=/root/soft/zookeeper    # add to ~/.bashrc
+	$ cd <fsl-nfs-ganesha>/mybuild/
+	$ make install

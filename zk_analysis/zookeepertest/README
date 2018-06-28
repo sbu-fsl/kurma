@@ -1,0 +1,10 @@
+ZOOKEEPER PERFORMANCE TESTER
+============================
+
+Author: sgoswami
+Email: sgoswami@cs.stonybrook.edu
+
+This java application makes runs of zookeeper with different actions, Znode types and number of Znodes
+and records logs for Zookeeper performance analysis.
+
+Read the runner.sh file for instructions on how to run.

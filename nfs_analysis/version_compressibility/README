@@ -1,0 +1,46 @@
+This code is used for version compressibility analysis of nfs trace containing
+only write ops. The file is divided into chunks and for each modification in the
+chunk, associated version number is updated. This analysis gives the idea about 
+how much compressibility can be achieved on the array of version numbers
+for a particular file.
+Note: The analysis skips small files (< 1M size).
+
+Mainly two different compression libs were used for this analysis:
+1) http://www.zlib.net/
+2) a. https://github.com/lemire/FastPFor  [32 bit]
+   b. https://github.com/lemire/FrameOfReference [64 bit]
+
+DataSeries Lib has been used for extracting the write only ops in formatted output.
+
+How to analyze the nfs traces?
+
+1] Download the nfs trace set from below:
+  http://iotta.snia.org/traces/
+
+2] Download and install the relevant compression libs from above mentioned links.
+    (keep the extracted libs in current dir "version_compressibility")
+
+3] "make" to generate extract_snia_nfs_write binary.
+
+4] Run extract_write_only_txt.sh with nfs_trace dir.
+  -> this will generate readable files for each *.ds which has <fh, offset, length> records.
+     all files will be numerically sorted and merged into single file "nsorted.txt". This
+     ouput file will be used as an input for next step.
+
+5] a) To analyze with "zlib" compression:
+      g++ version_compress_Zlib.cpp  -lz -o ver_zlib
+      ./ver_zlib <path of nsorted.txt> <chunk_size in KB>
+
+   b) To analyze with "FastPFor" lib: (This works only for 32 bit integers)
+      g++ version_compress_fastpfor.cpp -o ver_fpfor
+      ./ver_fpfor <path of nsorted.txt> <chunk_size in KB>
+
+   c) To analyze with "FoR" lib:
+      g++ version_compress_FoR.cpp -o ver_FoR
+      ./ver_FoR <path of nsorted.txt> <chunk_size in KB> 
+   d) To analyze with "lzo-1" compression:
+      g++ ver_compress_lzo.cpp -llzo2 -o ver_compress_lzo
+      ./ver_compress_lzo <path of nsorted.txt> <chunk_size in KB>
+      
+Some trace sets and corresponding results are dumped in following homedir:
+ /home/mukul/nfs-ds/

@@ -1,0 +1,41 @@
+This is the code of secret sharing library, which include algorithms such as
+AONS-RS and CAONS-RS.  The code is from CDStore, which was in C++.  I added JNI
+wrapper for kurma to use the algorithms in JAVA.
+
+INSTALL on Linux
+================
+Install the dependency:
+
+        $ sudo apt-get install libssl1.0.0 libboost-all-dev libsnappy-dev libssl-dev
+
+        $ git clone https://github.com/chintran27/CDStore.git
+        $ cd CDStore/trunk/src/client/lib/gf_complete
+        $ ./configure && make
+        $ sudo make install
+
+Then build in this directory.
+
+        $ make          # on Linux
+
+
+INSTALL on Mac
+==============
+
+        $ brew install openssl
+        $ make -f Makefile.mac  # on mac
+
+
+TEST
+====
+Test the C++ code:
+
+        $ ./aontrs-test
+
+Verify that it prints "SUCCEED!!!"
+
+
+Test the java code:
+
+        $ java secretsharing.CDCodecJNI
+
+Verify that it prints "true".

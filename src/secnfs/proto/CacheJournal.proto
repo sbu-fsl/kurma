@@ -1,0 +1,20 @@
+package secnfs.proto;
+
+message FileExtentMeta {
+  required uint64 offset = 1;
+  required uint64 length = 2;
+  required uint32 cache_state = 3;
+}
+
+message FileCacheMeta {
+  optional string file_handle = 1;
+  optional bool newly_created = 2;    // a new file that not ever written back
+  repeated FileExtentMeta extents = 3;
+  // The timestamp of the last remote change when this cache was closed in
+  // microseconds.  Used for cache revalidation.
+  optional uint64 remote_change_time = 4;
+}
+
+message CacheJournal {
+  optional double last_commit = 1;	// timestamp of the last journal commit
+}

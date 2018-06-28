@@ -1,0 +1,62 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<project>
+  <actions/>
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties/>
+  <scm class="hudson.plugins.git.GitSCM" plugin="git@2.4.2">
+    <configVersion>2</configVersion>
+    <userRemoteConfigs>
+      <hudson.plugins.git.UserRemoteConfig>
+        <url>mchen@git.fsl.cs.sunysb.edu:/scm/fslgit/fsl-nfs-ganesha.git</url>
+        <credentialsId>ab9e8379-f11c-4e0f-901e-5fb4d978472d</credentialsId>
+      </hudson.plugins.git.UserRemoteConfig>
+    </userRemoteConfigs>
+    <branches>
+      <hudson.plugins.git.BranchSpec>
+        <name>kurma_fsal</name>
+      </hudson.plugins.git.BranchSpec>
+    </branches>
+    <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+    <submoduleCfg class="list"/>
+    <extensions/>
+  </scm>
+  <canRoam>true</canRoam>
+  <disabled>false</disabled>
+  <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
+  <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
+  <triggers>
+    <hudson.triggers.SCMTrigger>
+      <spec>H/30 * * * *</spec>
+      <ignorePostCommitHooks>false</ignorePostCommitHooks>
+    </hudson.triggers.SCMTrigger>
+  </triggers>
+  <concurrentBuild>true</concurrentBuild>
+  <builders>
+    <hudson.tasks.Shell>
+      <command>git submodule update --init</command>
+    </hudson.tasks.Shell>
+    <hudson.plugins.cmake.CToolBuilder plugin="cmakebuilder@2.4.1">
+      <installationName>InSearchPath</installationName>
+      <workingDir>JenkinsBuild</workingDir>
+      <toolArgs>-DCMAKE_BUILD_TYPE=Debug ../src</toolArgs>
+      <toolId>cmake</toolId>
+    </hudson.plugins.cmake.CToolBuilder>
+    <hudson.tasks.Shell>
+      <command>cd JenkinsBuild &amp;&amp; make</command>
+    </hudson.tasks.Shell>
+    <hudson.plugins.cmake.CToolBuilder plugin="cmakebuilder@2.4.1">
+      <installationName>InSearchPath</installationName>
+      <workingDir>JenkinsBuild</workingDir>
+      <toolId>ctest</toolId>
+    </hudson.plugins.cmake.CToolBuilder>
+  </builders>
+  <publishers>
+    <hudson.tasks.Mailer plugin="mailer@1.16">
+      <recipients>v.mingchen@gmail.com hcpatel@cs.stonybrook.edu</recipients>
+      <dontNotifyEveryUnstableBuild>false</dontNotifyEveryUnstableBuild>
+      <sendToIndividuals>false</sendToIndividuals>
+    </hudson.tasks.Mailer>
+  </publishers>
+  <buildWrappers/>
+</project>

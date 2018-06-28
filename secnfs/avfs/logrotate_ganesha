@@ -1,0 +1,11 @@
+/var/log/avfs.ganesha.log {
+    daily
+    size 1G
+    dateext
+    rotate 7
+    compress
+    delaycompress
+    copytruncate
+    notifempty
+    missingok
+}

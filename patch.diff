@@ -1,0 +1,965 @@
+commit 994876d5e491bac004d0fb864120a33441f0a269
+Merge: 0c92c79 fb5ce81
+Author: Arun Olappamanna Vasudevan <aolappamanna@cs.stonybrook.edu>
+Date:   Mon Apr 13 08:00:01 2015 -0400
+
+    periodic writeback for each file
+    
+    Change-Id: Iaf391754823e9fe6459c115f335ce29dffeb7c2b
+
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/CMakeLists.txt
+index a74030d,b7a55ac..3262f47
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/CMakeLists.txt
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/CMakeLists.txt
+@@@ -24,6 -24,6 +24,8 @@@ SET(fsalpcache_LIB_SRC
+     export.c
+     cache_handle.c
+     antivirus.c
+++   writeback_manager.h
+++   writeback_manager.c
+  )
+  
+  add_library(fsalpcache SHARED ${fsalpcache_LIB_SRCS})
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
+index de60d40,17a1d73..68afe1e
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.c
+@@@ -7,6 -7,9 +7,21 @@@
+  #include "cache_handle.h"
+  #include "antivirus.h"
+  #include "nfs_file_handle.h"
+ -
+ -#define PC_CRT(fmt, args...) LogCrit(COMPONENT_FSAL, "=pcache=" fmt, ## args)
+ -#define PC_DBG(fmt, args...) LogDebug(COMPONENT_FSAL, "=pcache=" fmt, ## args)
+++#include "writeback_manager.h"
+++
+++#define lock_mutex_av(obj)                                                     \
+++	do {                                                                   \
+++		if (enable_av) {                                               \
+++			pthread_mutex_lock(&(obj)->pc_av_lock);                \
+++		}                                                              \
+++	} while (0)
+++
+++#define unlock_mutex_av(obj)                                                   \
+++	do {                                                                   \
+++		if (enable_av) {                                               \
+++			pthread_mutex_lock(&(obj)->pc_av_lock);                \
+++		}                                                              \
+++	} while (0)
+  
+  typedef fsal_status_t (*op_cb)(struct fsal_obj_handle *obj_hdl, uint64_t offset,
+  			       size_t buffer_size, void *buffer, size_t *amount,
+@@@ -50,10 -54,11 +66,11 @@@ static fsal_status_t get_object_handle(
+  	fsal_status_t ret =
+  	    pcachefs_create_handle(super_fsal_export, &hdl_desc, obj_hdl);
+  	if (FSAL_IS_ERROR(ret)) {
+- 		PC_CRT("Unable to object handle from descriptor");
++ 		LogCrit(COMPONENT_FSAL,
++ 			"Unable to object handle from descriptor");
+  		return ret;
+  	}
+ -	LogFullDebug(COMPONENT_FSAL, "Object handle %p", *obj_hdl);
+ +	PC_FULL("Object handle %p", *obj_hdl);
+  	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+  }
+  
+@@@ -177,14 -183,14 +195,14 @@@ static fsal_status_t read_and_fill(stru
+  
+  	*end_of_file = ((offset + *read_amount) == filesize);
+  
+--	PC_DBG("return: %d; read %zd bytes at %zd with end-of-file %s\n",
+--	       ret.major, *read_amount, offset,
+--	       (*end_of_file ? "set" : "unset"));
+++	LogDebug(COMPONENT_FSAL,
+++		 "return: %d; read %zd bytes at %zd with end-of-file %s\n",
+++		 ret.major, *read_amount, offset,
+++		 (*end_of_file ? "set" : "unset"));
+  
+  	return ret;
+  }
+  
+--
+  /*
+   *    cache | server | remarks
+   *    ------+--------+----------------------------------------------------------
+@@@ -214,11 -220,11 +232,11 @@@ static fsal_status_t __cachefs_read(str
+  		return ret;
+  	}
+  
+ -	LogFullDebug(COMPONENT_FSAL, "handle: %p", obj_hdl);
+ +	PC_FULL("handle: %p", obj_hdl);
+  	int lookup_ret = lookup_cache(&handle, offset, buffer_size, buffer,
+  				      &cached_offset, &cached_length);
+- 	PC_FULL("cached_offset: %zu, cached_length: %zu",
+ -	LogFullDebug(COMPONENT_FSAL, "cached_offset: %zu, cached_length: %zu",
+--		     cached_offset, cached_length);
+++	PC_FULL("cached_offset: %zu, cached_length: %zu", cached_offset,
+++		cached_length);
+  	if (lookup_ret == NOT_FOUND) {
+  		ret = read_and_fill(obj_hdl, offset, buffer_size, buffer,
+  				    read_amount, end_of_file);
+@@@ -238,9 -244,10 +256,10 @@@
+  		}
+  		assert(*read_amount == new_buffer_size);
+  		*read_amount += cached_length;
+ -		LogFullDebug(COMPONENT_FSAL, "Middle or Back match");
+ +		PC_FULL("Middle or Back match");
+  	} else {
+- 		PC_CRT("invalid cache lookup result: %d", lookup_ret);
++ 		LogCrit(COMPONENT_FSAL, "invalid cache lookup result: %d",
++ 			lookup_ret);
+  		ret = fsalstat(ERR_FSAL_IO, 0);
+  	}
+  
+@@@ -317,6 -325,6 +336,7 @@@ fsal_status_t cachefs_write(struct fsal
+  	if (FSAL_IS_ERROR(ret_hdl_init)) {
+  		return ret_hdl_init;
+  	}
+++	lock_mutex_av(obj_hdl);
+  	int ret = insert_cache(&handle, offset, buffer_size, buffer,
+  			       writeback_seconds);
+  	free_cache_handle(&handle);
+@@@ -330,10 -338,10 +350,12 @@@
+  		r = next_ops.obj_ops->write(obj_hdl, offset, buffer_size,
+  					    buffer, write_amount, fsal_stable);
+  		if (FSAL_IS_ERROR(r)) {
+--			return r;
+++			goto unlock;
+  		}
+  	}
+  	update_pc_filesize(obj_hdl, offset + buffer_size);
+++unlock:
+++	unlock_mutex_av(obj_hdl);
+  	return r;
+  }
+  
+@@@ -365,8 -373,8 +387,7 @@@ fsal_status_t cachefs_commit(struct fsa
+  }
+  
+  /* pc_filesize_lock should be held by caller */
+--static bool read_file_and_scan(struct fsal_obj_handle *obj_hdl, uint64_t offset,
+--			       size_t buffer_size, void *buffer)
+++bool read_file_and_scan(struct fsal_obj_handle *obj_hdl)
+  {
+  	size_t file_size;
+  	void *file_buff;
+@@@ -387,37 -396,37 +409,15 @@@
+  		return true;
+  	}
+  
+--	// read beginning portion of file
+--	if (offset) {
+--		ret = cachefs_read(obj_hdl, 0, offset, file_buff, &read_amount,
+--				   &end_of_file, true);
+--		if (end_of_file || read_amount < offset) {
+--			LogWarn(COMPONENT_FSAL, "File %p not scanned: "
+--						"read_amount %lu, read length "
+--						"%lu, end of file %d",
+--				obj_hdl, read_amount, offset, end_of_file);
+--			gsh_free(file_buff);
+--			return true;
+--		}
+--	}
+--
+--	// copy write buffer
+--	memcpy(file_buff + offset, buffer, buffer_size);
+--
+--	// read end portion of file
+--	if (offset + buffer_size < file_size) {
+--		size_t off = offset + buffer_size;
+--		size_t len = file_size - off;
+--		ret = cachefs_read(obj_hdl, off, len, file_buff + off,
+--				   &read_amount, &end_of_file, true);
+--		if (read_amount < len) {
+--			LogWarn(COMPONENT_FSAL,
+--				"File %p not scanned: read_amount %lu, read "
+--				"length%lu, end of file %d, offset %lu",
+--				obj_hdl, read_amount, len, end_of_file, off);
+--			gsh_free(file_buff);
+--			return true;
+--		}
+++	ret = cachefs_read(obj_hdl, 0, file_size, file_buff, &read_amount,
+++			   &end_of_file, true);
+++	if (read_amount < file_size) {
+++		LogWarn(COMPONENT_FSAL, "File %p not scanned: "
+++					"read_amount %lu, read length "
+++					"%lu, end of file %d",
+++			obj_hdl, read_amount, file_size, end_of_file);
+++		gsh_free(file_buff);
+++		return true;
+  	}
+  
+  	if (av_scan(file_buff, file_size) != 0) {
+@@@ -429,48 -438,48 +429,6 @@@
+  	return true;
+  }
+  
+--bool writeback(struct const_buffer_t *cache_hdl, uint64_t offset,
+--	       size_t buffer_size, const void *buffer, size_t *write_amount)
+--{
+--	struct user_cred user_credentials;
+--	struct fsal_obj_handle *obj_hdl;
+--	struct req_op_context req_ctx;
+--	bool fsal_stable;
+--	fsal_status_t ret;
+--
+--	// set context in writeback thread
+--	memset(&req_ctx, 0, sizeof(struct req_op_context));
+--	op_ctx = &req_ctx;
+--	op_ctx->fsal_export = super_fsal_export;
+--	op_ctx->creds = &user_credentials;
+--	init_credentials();
+--	op_ctx->creds->caller_uid = 0;
+--	op_ctx->creds->caller_gid = 0;
+--	// get obj handle
+--	fsal_status_t ret_get_hdl = get_object_handle(cache_hdl, &obj_hdl);
+--	if (FSAL_IS_ERROR(ret_get_hdl)) {
+--		return false;
+--	}
+--	PC_DBG("offset: %zu, buffer_size: %zu, obj_hdl: %p", offset,
+--	       buffer_size, obj_hdl);
+--
+--	if (enable_av) {
+--		if (!read_file_and_scan(obj_hdl, offset, buffer_size,
+--					(void *)buffer)) {
+--			// TODO(arun): Invalidate cache?
+--			*write_amount = buffer_size;
+--			return true;
+--		}
+--	}
+--
+--	ret = write_in_loop(next_ops.obj_ops->write, pcache_maxwrite, obj_hdl,
+--			    offset, buffer_size, (void *)buffer, write_amount,
+--			    &fsal_stable);
+--	PC_DBG("Write amount: %zu/%zu", *write_amount, buffer_size);
+--
+--	return !(FSAL_IS_ERROR(ret));
+--}
+--
+  fsal_status_t cachefs_file_unlink(struct fsal_obj_handle *dir_hdl,
+  				  const char *name)
+  {
+@@@ -494,10 -503,11 +452,11 @@@
+  	// remove from cache
+  	// TODO(arun): hardlinks
+  	if ((cret = delete_cache(&cache_hdl)) < 0) {
+- 		PC_CRT("cache invalidate returned error %d", cret);
++ 		LogCrit(COMPONENT_FSAL, "cache invalidate returned error %d",
++ 			cret);
+  	}
+  	free_cache_handle(&cache_hdl);
+--	PC_DBG("file unlinked: %s\n", name);
+++	LogDebug(COMPONENT_FSAL, "file unlinked: %s\n", name);
+  	return next_ops.obj_ops->unlink(dir_hdl, name);
+  }
+  
+@@@ -523,6 -534,6 +482,7 @@@ fsal_status_t cachefs_setattrs(struct f
+  	int cret;
+  	struct const_buffer_t cache_hdl;
+  
+++	lock_mutex_av(obj_hdl);
+  	pthread_rwlock_wrlock(&obj_hdl->pc_filesize_lock);
+  	old_size = pc_get_filesize(obj_hdl);
+  	if (FSAL_TEST_MASK(attrs->mask, ATTR_SIZE)) {
+@@@ -544,17 -556,17 +505,19 @@@
+  		}
+  		obj_hdl->pc_filesize_valid = true;
+  		obj_hdl->pc_filesize = new_size;
+--		PC_DBG("file size set from %zu to %zu\n", old_size, new_size);
+++		LogDebug(COMPONENT_FSAL, "file size set from %zu to %zu\n",
+++			 old_size, new_size);
+  	}
+  
+  	ret = next_ops.obj_ops->setattrs(obj_hdl, attrs);
+  	if (FSAL_IS_ERROR(ret)) {
+--		PC_CRT("setattrs failed: major %d minor %d\n", ret.major,
+--		       ret.minor);
+++		LogCrit(COMPONENT_FSAL, "setattrs failed: major %d minor %d\n",
+++			ret.major, ret.minor);
+  	}
+  
+  unlock:
+  	pthread_rwlock_unlock(&obj_hdl->pc_filesize_lock);
+++	unlock_mutex_av(obj_hdl);
+  	return ret;
+  }
+  
+@@@ -574,6 -587,25 +538,166 @@@ fsal_status_t cachefs_lookup_path(struc
+  	    op_ctx->fsal_export->ops->fs_maxread(op_ctx->fsal_export);
+  	pcache_maxwrite =
+  	    op_ctx->fsal_export->ops->fs_maxwrite(op_ctx->fsal_export);
+- 	PC_DBG("max read %lu, max write %lu", pcache_maxread, pcache_maxwrite);
++ 	LogDebug(COMPONENT_FSAL, "max read %lu, max write %lu", pcache_maxread,
++ 		 pcache_maxwrite);
+  	return next_ops.exp_ops->lookup_path(exp_hdl, path, handle);
+  }
++ 
+ -fsal_status_t cachefs_close(struct fsal_obj_handle *handle) {
+++fsal_status_t scan_and_write(struct fsal_obj_handle *obj_hdl, bool set_op_ctx)
+++{
++ 	struct const_buffer_t handle;
++ 	fsal_status_t ret;
+++	size_t offset, length;
+++	const char *dirty_data;
+++	size_t write_amount;
+++	bool fsal_stable;
+++	bool pending_wb;
++ 
++ 	ret = cache_handle_init(obj_hdl, &handle);
++ 	if (FSAL_IS_ERROR(ret)) {
++ 		return ret;
++ 	}
++ 
+ -	// TODO: scan for virus
+++	// why lock: we don't want following situations (1) and (2):
+++	//
+++	// thread 1              | thread 2
+++	// ----------------------+--------------------------
+++	// =====================(1)=========================
+++	// scan completed        |
+++	//                       | write: insert new data or
+++	//                       | setattrs: change file size
+++	// writeback             |
+++	//                       |
+++	// [Problem unscanned data is written back!]
+++	//                       |
+++	// =====================(2)==========================
+++	//  close: scanning      | scanner thread: scanning
+++	//                       |
+++	//  [Just inefficient]   |
+++	//
+++	lock_mutex_av(obj_hdl);
+++	pending_wb =
+++	    poll_writeback_cache(&handle, &offset, &length, &dirty_data);
+++	if (!pending_wb) {
+++		ret = fsalstat(ERR_FSAL_NO_ERROR, 0);
+++		goto unlock;
+++	}
+++	if (enable_av) {
+++		pthread_rwlock_rdlock(&obj_hdl->pc_filesize_lock);
+++		if (!read_file_and_scan(obj_hdl)) {
+++			int r;
+++			size_t filesize;
+++			// TODO: write to virus data folder
+++			if ((r = mark_writeback_done(&handle, offset, length,
+++						     &dirty_data)) != 0) {
+++				LogCrit(COMPONENT_FSAL,
+++					"mark_writeback_done returned %d "
+++					"obj_hdl = %p, offset = %zu, length = "
+++					"%zu");
+++				print_base64(&handle);
+++			}
+++			filesize = pc_get_filesize(obj_hdl);
+++			if ((r = invalidate_cache(&handle, 0, filesize,
+++						  true)) != 0) {
+++				LogCrit(
+++				    COMPONENT_FSAL,
+++				    "Invalidate cache failed for [%zu. %zu) "
+++				    "with ret %d",
+++				    0, filesize, r);
+++				print_base64(&handle);
+++			}
+++			pthread_rwlock_unlock(&obj_hdl->pc_filesize_lock);
+++			ret = fsalstat(ERR_FSAL_NO_ERROR, 0);
+++			goto unlock;
+++		}
+++		pthread_rwlock_unlock(&obj_hdl->pc_filesize_lock);
+++	}
+++
+++	// writebacks
+++	do {
+++		LogDebug(COMPONENT_FSAL,
+++			 "offset: %zu, buffer_size: %zu, obj_hdl: %p", offset,
+++			 length, obj_hdl);
+++		ret = write_in_loop(next_ops.obj_ops->write, pcache_maxwrite,
+++				    obj_hdl, offset, length, (void *)dirty_data,
+++				    &write_amount, &fsal_stable);
+++		LogDebug(COMPONENT_FSAL, "Write amount: %zu/%zu", write_amount,
+++			 length);
+++		if (FSAL_IS_ERROR(ret)) {
+++			LogCrit(COMPONENT_FSAL,
+++				"write_in_loop failed: major: %d, minor: %d",
+++				ret.major, ret.minor);
+++			goto unlock;
+++		}
+++	} while (poll_writeback_cache(&handle, &offset, &length, &dirty_data));
+++
+++unlock:
+++	unlock_mutex_av(obj_hdl);
+++	free_cache_handle(&handle);
+++	return ret;
+++}
++ 
+ -	// pending writebacks
+ -	while(true) {
+ -		if
+++fsal_status_t cachefs_close(struct fsal_obj_handle *obj_hdl)
+++{
+++	fsal_status_t ret;
+++	ret = scan_and_write(obj_hdl, false);
+++	if (FSAL_IS_ERROR(ret)) {
+++		LogCrit(COMPONENT_FSAL,
+++			"scan_and_write returned error major %d, minor %d",
+++			ret.major, ret.minor);
++ 	}
+++	if (next_ops.obj_ops->status(obj_hdl) & FSAL_O_WRITE) {
+++		ret = deregister_wb_file(obj_hdl);
+++		if (FSAL_IS_ERROR(ret)) {
+++			LogCrit(COMPONENT_FSAL, "deregister_wb_file failed");
+++		}
+++	}
+++	return next_ops.obj_ops->close(obj_hdl);
+++}
+++
+++void writeback_thread(struct fsal_obj_handle *obj_hdl)
+++{
+++	struct user_cred user_credentials;
+++	struct req_op_context req_ctx;
+++
+++	// set op_ctx
+++	memset(&req_ctx, 0, sizeof(struct req_op_context));
+++	op_ctx = &req_ctx;
+++	op_ctx->fsal_export = super_fsal_export;
+++	op_ctx->creds = &user_credentials;
+++	init_credentials();
+++	op_ctx->creds->caller_uid = 0;
+++	op_ctx->creds->caller_gid = 0;
+++
+++	scan_and_write(obj_hdl, true);
++ }
++ 
+++/*
+++fsal_status_t writeback_thread_init(struct fsal_obj_handle *obj_hdl) {
+++	pthread_t thread;
+++	int ret = pthread_create(&thread, NULL, &writeback_thread, (void*)
+++obj_hdl);
+++	if (ret != 0) {
+++		LogCrit(COMPONENT_FSAL, "pthread_create failed: ret %d, obj_hdl:
+++%p", ret, obj_hdl);
+++		return fsalstat(ERR_FSAL_FAULT, 0);
+++	}
+++	LogDebug(COMPONENT_FSAL, "writeback thread started for obj_hdl %p",
+++obj_hdl);
+++	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+++}*/
+++
+++fsal_status_t cachefs_open(struct fsal_obj_handle *obj_hdl,
+++			   fsal_openflags_t openflags)
+++{
+++	fsal_status_t ret;
+++	// TODO: check virus folder
+++	ret = next_ops.obj_ops->open(obj_hdl, openflags);
+++	if (FSAL_IS_ERROR(ret)) {
+++		return ret;
+++	}
+++	if (openflags | FSAL_O_WRITE) {
+++		LogDebug(COMPONENT_FSAL, "file %p opened for writing", obj_hdl);
+++		register_wb_file(obj_hdl);
+++	}
+++}
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.h
+index 5b35304,e9494fb..1905e1c
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.h
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/cache_handle.h
+@@@ -7,8 -7,8 +7,10 @@@
+  
+  /* Write back to server
+   */
+--bool writeback(struct const_buffer_t *cache_hdl, uint64_t offset,
+--	       size_t buffer_size, const void *buffer, size_t *write_amount);
+++//bool writeback(struct const_buffer_t *cache_hdl, uint64_t offset,
+++//	       size_t buffer_size, const void *buffer, size_t *write_amount);
+++
+++void writeback_thread(struct fsal_obj_handle *obj_hdl);
+  
+  fsal_status_t cachefs_read(struct fsal_obj_handle *obj_hdl, uint64_t offset,
+  			   size_t buffer_size, void *buffer,
+@@@ -32,6 -32,8 +34,11 @@@ fsal_status_t cachefs_setattrs(struct f
+  fsal_status_t cachefs_lookup_path(struct fsal_export *exp_hdl, const char *path,
+  				  struct fsal_obj_handle **handle);
+  
++ fsal_status_t cachefs_close(struct fsal_obj_handle *handle);
++ 
+++fsal_status_t cachefs_open(struct fsal_obj_handle *obj_hdl,
+++			   fsal_openflags_t openflags);
+++
+  // constants
+  #define PCACHE_MAXWRITE 32768
+  #define PCACHE_MAXREAD 32768
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/export.c
+index 92c37c8,92c37c8..63affdb
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/export.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/export.c
+@@@ -357,8 -357,8 +357,9 @@@ fsal_status_t pcachefs_create_export(st
+  		LogFullDebug(COMPONENT_FSAL, "Anti-virus not enabled");
+  	}
+  
+--	init_proxy_cache(data_cache, meta_cache, &writeback);
+++	init_proxy_cache(data_cache, meta_cache, NULL);
+  	pm_init();
+++	wb_mgr_init(&writeback_thread);
+  
+  	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+  }
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/file.c
+index 90a22f7,f325415..c117bd0
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/file.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/file.c
+@@@ -47,7 -47,7 +47,7 @@@
+  fsal_status_t pcachefs_open(struct fsal_obj_handle *obj_hdl,
+  			    fsal_openflags_t openflags)
+  {
+--	return next_ops.obj_ops->open(obj_hdl, openflags);
+++	return cachefs_open(obj_hdl, openflags);
+  }
+  
+  /* pcachefs_status
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/main.c
+index 896aad7,896aad7..fb51a07
+--- a/src/FSAL/Stackable_FSALs/FSAL_PCACHE/main.c
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/main.c
+@@@ -42,6 -42,6 +42,7 @@@
+  #include "pcachefs_methods.h"
+  #include "cache_handle.h"
+  #include "antivirus.h"
+++#include "writeback_manager.h"
+  
+  /* PCACHEFS FSAL module private storage
+   */
+@@@ -202,6 -202,6 +203,7 @@@ MODULE_FINI void pcachefs_unload(void
+  		return;
+  	}
+  
+++	wb_mgr_destroy();
+  	destroy_proxy_cache(); // TODO(arun): How to make sure all dirty data is
+  			       // written
+  	pm_destroy();
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/writeback_manager.c
+index 0000000,0000000..7def03d
+new file mode 100644
+--- /dev/null
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/writeback_manager.c
+@@@ -1,0 -1,0 +1,278 @@@
+++#include "writeback_manager.h"
+++#include "cache_handle.h"
+++
+++struct obj_for_wb_t {
+++	struct avltree_node avl_node;
+++	struct glist_head list_node;
+++	struct fsal_obj_handle *obj_hdl;
+++	time_t last_wb;
+++	unsigned int refcnt;
+++};
+++
+++static struct avltree tree_head;
+++static struct glist_head list_head;
+++
+++static writebackfunc do_writeback;
+++static pthread_t timer_tid;
+++static pthread_mutex_t big_lock;
+++
+++#define MAX_WB_THREADS 10
+++static struct glist_head wb_thread_list_head;
+++
+++struct wb_thread_t {
+++	struct glist_head list_node;
+++	struct glist_head obj_list;
+++	pthread_t tid;
+++} wb_thread_obj[MAX_WB_THREADS];
+++
+++static inline struct obj_for_wb_t *wb_avltree_insert(struct obj_for_wb_t *obj)
+++{
+++	struct avltree_node *node;
+++	node = avltree_insert(&obj->avl_node, &tree_head);
+++	if (node)
+++		return avltree_container_of(node, struct obj_for_wb_t,
+++					    avl_node);
+++	return NULL;
+++}
+++
+++static inline void wb_avltree_remove(struct obj_for_wb_t *obj)
+++{
+++	avltree_remove(&obj->avl_node, &tree_head);
+++}
+++
+++static inline void wb_glist_add_tail(struct obj_for_wb_t *obj,
+++				     struct glist_head *list_hd)
+++{
+++	glist_add_tail(list_hd, &obj->list_node);
+++}
+++
+++static inline void wb_glist_del(struct obj_for_wb_t *obj)
+++{
+++	glist_del(&obj->list_node);
+++}
+++
+++static inline void up_ref(struct obj_for_wb_t *obj) { ++obj->refcnt; }
+++
+++static inline void down_ref(struct obj_for_wb_t *obj)
+++{
+++	if (--obj->refcnt) {
+++		return;
+++	}
+++	LogFullDebug(COMPONENT_FSAL, "Deleting %p", obj->obj_hdl);
+++	wb_avltree_remove(obj);
+++	wb_glist_del(obj);
+++	free(obj);
+++}
+++
+++static int compare_wb_file_node(const struct avltree_node *avl_node1,
+++				const struct avltree_node *avl_node2)
+++{
+++	const struct obj_for_wb_t *obj1 =
+++	    avltree_container_of(avl_node1, struct obj_for_wb_t, avl_node);
+++	const struct obj_for_wb_t *obj2 =
+++	    avltree_container_of(avl_node2, struct obj_for_wb_t, avl_node);
+++	return (int)((unsigned long)obj1->obj_hdl -
+++		     (unsigned long)obj2->obj_hdl);
+++}
+++
+++static inline struct wb_thread_t *get_wb_thread()
+++{
+++	struct wb_thread_t *thread_obj = glist_first_entry(
+++	    &wb_thread_list_head, struct wb_thread_t, list_node);
+++	if (thread_obj->tid != 0) {
+++		return NULL;
+++	}
+++	glist_del(&thread_obj->list_node);
+++	glist_add_tail(&wb_thread_list_head, &thread_obj->list_node);
+++	glist_init(&thread_obj->obj_list);
+++	return thread_obj;
+++}
+++
+++static inline void put_wb_thread(struct wb_thread_t *thread_obj)
+++{
+++	thread_obj->tid = 0;
+++	glist_del(&thread_obj->list_node);
+++	glist_add(&wb_thread_list_head, &thread_obj->list_node);
+++}
+++
+++static void *wb_thread(void *);
+++static inline int start_wb_thread(struct wb_thread_t *thread_obj)
+++{
+++	return pthread_create(&thread_obj->tid, NULL, &wb_thread, thread_obj);
+++}
+++
+++static inline void wb_thread_join_all()
+++{
+++	struct wb_thread_t *thread_obj;
+++	struct glist_head *node;
+++	glist_for_each(node, &wb_thread_list_head)
+++	{
+++		thread_obj = glist_entry(node, struct wb_thread_t, list_node);
+++		if (thread_obj->tid) {
+++			pthread_join(thread_obj->tid, NULL);
+++			thread_obj->tid = 0;
+++		}
+++	}
+++}
+++
+++static void *wb_thread(void *arg)
+++{
+++	struct wb_thread_t *thread_obj = (struct wb_thread_t *)arg;
+++	struct glist_head *node;
+++	struct obj_for_wb_t *obj;
+++	time_t cur;
+++	glist_for_each(node, &thread_obj->obj_list)
+++	{
+++		obj = glist_entry(node, struct obj_for_wb_t, list_node);
+++		do_writeback(obj->obj_hdl);
+++	}
+++	pthread_mutex_lock(&big_lock);
+++	time(&cur);
+++	glist_for_each(node, &thread_obj->obj_list)
+++	{
+++		obj = glist_entry(node, struct obj_for_wb_t, list_node);
+++		obj->last_wb = cur;
+++		down_ref(obj);
+++	}
+++	glist_splice_tail(&list_head, &thread_obj->obj_list);
+++	put_wb_thread(thread_obj);
+++	pthread_mutex_unlock(&big_lock);
+++	pthread_exit(0);
+++}
+++
+++static void *timer_thread(void *arg)
+++{
+++	time_t cur;
+++	struct glist_head *node;
+++	struct obj_for_wb_t *obj;
+++	struct wb_thread_t *thread_obj;
+++	while (true) {
+++		sleep(5);
+++		pthread_mutex_lock(&big_lock);
+++		time(&cur);
+++		thread_obj = get_wb_thread();
+++		if (thread_obj == NULL)
+++			continue;
+++		glist_for_each(node, &list_head)
+++		{
+++			obj = glist_entry(node, struct obj_for_wb_t, list_node);
+++			if (difftime(cur, obj->last_wb) > 0) {
+++				wb_glist_del(obj);
+++				wb_glist_add_tail(obj, &thread_obj->obj_list);
+++				up_ref(obj);
+++				obj->last_wb = cur;
+++				LogFullDebug(COMPONENT_FSAL,
+++					     "time %s: going to writeback %p",
+++					     ctime(&cur), obj->obj_hdl);
+++			} else {
+++				break;
+++			}
+++		}
+++		if (!glist_empty(&thread_obj->obj_list)) {
+++			int ret;
+++			if ((ret = start_wb_thread(thread_obj)) != 0) {
+++				LogCrit(COMPONENT_FSAL,
+++					"start thread failed %d", ret);
+++				glist_for_each(node, &thread_obj->obj_list)
+++				{
+++					obj = glist_entry(node,
+++							  struct obj_for_wb_t,
+++							  list_node);
+++					down_ref(obj);
+++				}
+++				glist_splice_tail(&list_head,
+++						  &thread_obj->obj_list);
+++				put_wb_thread(thread_obj);
+++			}
+++		} else {
+++			put_wb_thread(thread_obj);
+++		}
+++		pthread_mutex_unlock(&big_lock);
+++	};
+++}
+++
+++fsal_status_t wb_mgr_init(writebackfunc wb)
+++{
+++	int ret, i;
+++	do_writeback = wb;
+++	if ((ret = pthread_mutex_init(&big_lock, NULL)) != 0) {
+++		LogCrit(COMPONENT_FSAL, "pthread_mutex_init failed with %d",
+++			ret);
+++		return fsalstat(ERR_FSAL_FAULT, 0);
+++	}
+++	glist_init(&list_head);
+++	if ((ret = avltree_init(&tree_head, compare_wb_file_node, 0)) != 0) {
+++		LogCrit(COMPONENT_FSAL, "avltree_init returned %d", ret);
+++		return fsalstat(ERR_FSAL_FAULT, 0);
+++	}
+++	glist_init(&wb_thread_list_head);
+++	for (i = 0; i < MAX_WB_THREADS; i++) {
+++		glist_add_tail(&wb_thread_list_head,
+++			       &wb_thread_obj[i].list_node);
+++	}
+++	// start thread with default attributes
+++	ret = pthread_create(&timer_tid, NULL, &timer_thread, NULL);
+++	if (ret != 0) {
+++		LogCrit(COMPONENT_FSAL, "pthread_create failed: ret %d", ret);
+++		return fsalstat(ERR_FSAL_FAULT, 0);
+++	}
+++	LogDebug(COMPONENT_FSAL, "timer thread started");
+++	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+++}
+++
+++fsal_status_t wb_mgr_destroy()
+++{
+++	// TODO(arun):
+++	// wait for all threads
+++	// free resources
+++}
+++
+++fsal_status_t register_wb_file(struct fsal_obj_handle *obj_hdl)
+++{
+++	struct obj_for_wb_t *obj =
+++	    (struct obj_for_wb_t *)malloc(sizeof(struct obj_for_wb_t));
+++	if (!obj) {
+++		return fsalstat(ERR_FSAL_NOMEM, 0);
+++	}
+++	memset(obj, 0, sizeof(struct obj_for_wb_t));
+++	struct obj_for_wb_t *ret;
+++	// insert in avl tree
+++	obj->obj_hdl = obj_hdl;
+++	pthread_mutex_lock(&big_lock);
+++	time(&obj->last_wb);
+++	if (ret = wb_avltree_insert(obj)) {
+++		LogFullDebug(COMPONENT_FSAL, "obj already exists");
+++		free(obj);
+++		obj = ret;
+++	} else {
+++		wb_glist_add_tail(obj, &list_head);
+++	}
+++	up_ref(obj);
+++	LogFullDebug(COMPONENT_FSAL, "file obj: %p, refcnt: %u, time: %s",
+++		     obj->obj_hdl, obj->refcnt, ctime(&obj->last_wb));
+++	pthread_mutex_unlock(&big_lock);
+++	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+++}
+++
+++fsal_status_t deregister_wb_file(struct fsal_obj_handle *obj_hdl)
+++{
+++	struct obj_for_wb_t item, *obj;
+++	struct avltree_node *node;
+++	item.obj_hdl = obj_hdl;
+++	pthread_mutex_lock(&big_lock);
+++	node = avltree_lookup(&item.avl_node, &tree_head);
+++	if (!node) {
+++		LogCrit(COMPONENT_FSAL, "Unable to find object handle %p",
+++			obj_hdl);
+++		return fsalstat(ERR_FSAL_FAULT, 0);
+++	}
+++	obj = avltree_container_of(node, struct obj_for_wb_t, avl_node);
+++	down_ref(obj);
+++	LogFullDebug(COMPONENT_FSAL, "%p is unregistered", obj_hdl);
+++	pthread_mutex_unlock(&big_lock);
+++	return fsalstat(ERR_FSAL_NO_ERROR, 0);
+++}
+++
+++/**
+++ * vim:noexpandtab:shiftwidth=8:tabstop=8:
+++ */
+diff --cc src/FSAL/Stackable_FSALs/FSAL_PCACHE/writeback_manager.h
+index 0000000,0000000..a662e94
+new file mode 100644
+--- /dev/null
++++ b/src/FSAL/Stackable_FSALs/FSAL_PCACHE/writeback_manager.h
+@@@ -1,0 -1,0 +1,19 @@@
+++#ifndef WB_MGR_H
+++#define WB_MGR_H
+++#include "avltree.h"
+++#include "ganesha_list.h"
+++#include "fsal.h"
+++#include "time.h"
+++#include "capi/common.h"
+++
+++typedef void (*writebackfunc)(struct fsal_obj_handle *obj_hdl);
+++
+++fsal_status_t register_wb_file(struct fsal_obj_handle *obj_hdl);
+++
+++fsal_status_t deregister_wb_file(struct fsal_obj_handle *obj_hdl);
+++
+++fsal_status_t wb_mgr_init(writebackfunc wb);
+++
+++fsal_status_t wb_mgr_destroy();
+++
+++#endif // WB_MGR_H
+diff --cc src/FSAL/commonlib.c
+index 6519690,6519690..64b8224
+--- a/src/FSAL/commonlib.c
++++ b/src/FSAL/commonlib.c
+@@@ -191,6 -191,6 +191,7 @@@ void fsal_obj_handle_init(struct fsal_o
+  	pthread_rwlock_init(&obj->lock, &attrs);
+  	pthread_rwlock_init(&obj->pc_filesize_lock, &attrs);
+  	obj->pc_filesize_valid = false;
+++	pthread_mutex_init(&obj->pc_av_lock, NULL);
+  
+  	fsal_attach_handle(exp->fsal, &obj->handles);
+  }
+@@@ -198,6 -198,6 +199,8 @@@
+  void fsal_obj_handle_uninit(struct fsal_obj_handle *obj)
+  {
+  	pthread_rwlock_destroy(&obj->lock);
+++	pthread_rwlock_destroy(&obj->pc_filesize_lock);
+++	pthread_mutex_destroy(&obj->pc_av_lock);
+  
+  	fsal_detach_handle(obj->fsal, &obj->handles);
+  
+diff --cc src/include/fsal_api.h
+index 755d84f,755d84f..4c3bd84
+--- a/src/include/fsal_api.h
++++ b/src/include/fsal_api.h
+@@@ -1130,9 -1130,9 +1130,10 @@@ struct fsal_obj_handle 
+  	struct fsal_obj_ops *ops;	/*< Operations vector */
+  	// TODO(arun): move to FSAL_PCACHE private
+  	size_t pc_filesize;		/*< Actual file size */
+--	// pc_filesize will be same attributes.filesize after writeback
+++	// pc_filesize will be same as attributes.filesize after writeback
+  	pthread_rwlock_t pc_filesize_lock;  /*< RW lock for pc_filesize */
+--	bool pc_filesize_valid;		/*< Flag for validity */
+++	bool pc_filesize_valid;		    /*< Flag for validity */
+++	pthread_mutex_t pc_av_lock; /*< Lock to enforce write what is scanned */
+  };
+  
+  /**
+diff --cc src/secnfs/cache/ProxyCacheTest.cpp
+index bb96108,b0a88f1..be95183
+--- a/src/secnfs/cache/ProxyCacheTest.cpp
++++ b/src/secnfs/cache/ProxyCacheTest.cpp
+@@@ -535,26 -530,6 +535,51 @@@ TEST_F(ProxyCacheTest, InvalidateAllDir
+    ExpectLookup("aaa", 2_b, 6_b, NOT_FOUND, 0, 0);
+  }
+  
+ +TEST_F(ProxyCacheTest, FileSpecificPollingShouldIgnoreDeadline) {
+ +  InsertDirty("aaa", 0, 1_b, 1);
+ +  ExpectNoWriteBack();
+ +  ExpectPollAndWriteBack("aaa", true, 0, 1_b, true);
+ +}
+ +
+ +
+ +TEST_F(ProxyCacheTest, NoDuplicateExtentsWithFileSpecificPolling) {
+ +  InsertDirty("aaa", 0, 1_b, 1);
+ +  InsertDirty("aaa", 2_b, 1_b, 1);
+ +  ExpectNoWriteBack();
+ +  ExpectPollAndWriteBack("aaa", true, 0, 1_b, true);
+ +  ExpectNoWriteBack();
+ +
+ +  sleep(1);
+ +
+ +  ExpectPollAndWriteBack("aaa", true, 2_b, 1_b);
+ +  ExpectNoWriteBack();
+ +}
+ +
+++TEST_F(ProxyCacheTest, RewriteDirty) {
+++  std::string buf1 = GetRandomString(10);
+++  EXPECT_EQ(0, cache_->Insert("aaa", 0, 10, buf1.data(), 1));
+++  std::string buf2 = GetRandomString(10);
+++  EXPECT_EQ(0, cache_->Insert("aaa", 0, 10, buf2.data(), 2));
+++  sleep(1);
+++  const char *cbuf1_wb;
+++  std::string buf1_wb(cbuf1_wb = ExpectPoll("aaa", true, 0, 10), 10);
+++  EXPECT_EQ(buf2, buf1_wb);
+++  EXPECT_EQ(0, cache_->MarkWriteBackDone("aaa", 0, 10, &cbuf1_wb));
+++  sleep(1);
+++  ExpectPoll("aaa", false, 0, 10);
+++}
+++
+++TEST_F(ProxyCacheTest, RewriteDirtyAndFileSpecificPolling) {
+++  std::string buf1 = GetRandomString(10);
+++  EXPECT_EQ(0, cache_->Insert("aaa", 0, 10, buf1.data(), 1));
+++  std::string buf2 = GetRandomString(10);
+++  EXPECT_EQ(0, cache_->Insert("aaa", 0, 10, buf2.data(), 2));
+++  const char *cbuf1_wb;
+++  std::string buf1_wb(cbuf1_wb = ExpectPoll("aaa", true, 0, 10, true), 10);
+++  EXPECT_EQ(buf2, buf1_wb);
+++  EXPECT_EQ(0, cache_->MarkWriteBackDone("aaa", 0, 10, &cbuf1_wb));
+++  ExpectPoll("aaa", false, 0, 0, true);
+++}
+  // TODO(mchen): delete a file with polled dirty extent
+  
+  }  // namespace test
+diff --cc src/secnfs/capi/proxy_cache.cpp
+index 9221ee7,9221ee7..50bf440
+--- a/src/secnfs/capi/proxy_cache.cpp
++++ b/src/secnfs/capi/proxy_cache.cpp
+@@@ -74,7 -74,7 +74,7 @@@ int invalidate_cache(const const_buffer
+    return ret < 0 ? ret : 0;
+  }
+  
+--int poll_writeback_cache(const_buffer_t* handle,
+++bool poll_writeback_cache(const_buffer_t* handle,
+                           size_t* offset,
+                           size_t* length,
+                           const char** dirty_data) {
+diff --cc src/secnfs/capi/proxy_cache.h
+index 8d20812,8d20812..249efd8
+--- a/src/secnfs/capi/proxy_cache.h
++++ b/src/secnfs/capi/proxy_cache.h
+@@@ -131,7 -131,7 +131,7 @@@ int invalidate_cache(const const_buffer
+   *
+   * The output parameters will be set only when the return value is positive.
+   */
+--int poll_writeback_cache(const_buffer_t* handle,
+++bool poll_writeback_cache(const_buffer_t* handle,
+                           size_t* offset,
+                           size_t* length,
+                           const char** dirty_data);

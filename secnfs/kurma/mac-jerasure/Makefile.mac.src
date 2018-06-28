@@ -1,0 +1,27 @@
+CC	= gcc
+CFLAGS	= -g -O3
+OBJS  	= galois.o jerasure.o reed_sol.o cauchy.o liberation.o
+
+all: ../../lib/libJerasure.dylib headers
+
+headers:
+	mkdir -p "../include/"
+	cp *.h ../include/
+
+../../lib/libJerasure.dylib: $(OBJS)
+	$(CC) -shared -Wl,-install_name,libJerasure.dylib \
+		-o ../../lib/libJerasure.dylib $(OBJS)
+
+clean:
+	rm -f ../../lib/libJerasure.dylib $(OBJS) ../include/*
+
+%.o: %.c
+	$(CC) $(CFLAGS) -fPIC -c $<
+
+galois.o: galois.h
+jerasure.o: jerasure.h galois.h
+reed_sol.o: jerasure.h galois.h reed_sol.h
+cauchy.o: jerasure.h galois.h cauchy.h
+liberation.o: jerasure.h galois.h liberation.h
+
+.PHONY: all headers

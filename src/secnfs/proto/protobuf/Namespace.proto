@@ -1,0 +1,181 @@
+// Kurma namespace metadata that are saved in ZooKeeper.
+//
+// For every message that will be serialized into znode data, a checksum will
+// be prepended externally to protect the whole message.  Therefore, we don't
+// see any checksum inside these messages.
+package secnfs.proto;
+
+import "proto/CacheJournal.proto"
+
+// Znode path: /<gw>/<volumename-unique-within-gateway>
+message Volume {
+  required uint32 meta_format_version = 1;
+}
+
+// fsid generator for all FS objects within a volume.
+// Znode path: /<gw>/<volumename>/IDGEN
+message IdGenerator {
+  required uint64 id = 1;             // fsid will be "gwid << 56 + id",
+                                      // where gwid is an eight-bit gateway ID
+
+  required uint64 generation = 2;     // will be increased if id
+                                      // grows as big as 2^^56
+}
+
+// Access Control Entry
+message ACE {
+  optional uint32 id = 1;             // uid or gid
+  optional uint32 type = 2;
+  optional uint32 perm = 3;
+}
+
+// Part of version vector of all gateways
+message GatewayVersion {
+  required string gateway = 1;
+  required uint64 version = 2;
+  optional uint64 timestamp = 3;
+}
+
+enum ObjectType {
+  DIR = 0;
+  FILE = 1;
+  LINK = 2;
+  DEV = 3;
+}
+
+message DirEntry {
+  required string name = 1;           // last component of the name
+  required string fileid = 2;         // unique ID of the child file or dir
+  optional ObjectType type = 3 [default = FILE];
+  optional uint64 timestamp = 4;      // time when this entry is added to the
+                                      // local gateway (not shared among
+                                      // gateways)
+}
+
+enum FileFlags {
+  INLINED = 1;                // tiny files saved inline
+  PRIVATE = 2;                // private files not shared among users
+  LOCAL = 4;                  // files not shared among gateways
+}
+
+// Znode path: /<gw>/<volumename>/xx/<fileid>, where xx is the sharding key
+message Directory {
+  required string name = 1;
+  required uint64 fileid = 2;
+  required uint64 generation = 3;
+  required uint64 parent = 4;         // fsid of parent directory
+
+  required uint32 mode = 5;
+  required uint32 owner_id = 6;
+  required uint32 group_id = 7;
+  required string gw_creator = 8;
+
+  optional uint64 create_time = 9;
+  optional uint64 change_time = 10;
+
+  repeated GatewayVersion vv = 11;    // version vector of directory content
+  repeated ACE acl = 12;
+  repeated DirEntry entries = 13;
+
+  optional uint32 flags = 14;         // bit field of FileFlags
+}
+
+// The file contains the file key encrypted by each gateway's public key.
+//
+// Znode path: <file-znode>/KEYMAP
+message KeyMap {
+  message KeyBlock {
+    required string gw_name = 1;
+    required bytes encrypted_key = 2;
+  };
+  required KeyBlock keymap = 1;
+}
+
+// Per-region access statistics for caching algorithm.
+//
+// Znode path: <file-znode>/CACHEMETA
+message CacheMeta {
+  optional uint64 last_access_time = 1;
+  optional uint64 change_time = 15;
+  optional uint32 count = 2;
+}
+
+// Represet a file (inode).
+//
+// Znode path: /<gw>/<volumename>/xx/<fileid>, where xx is the sharding key
+message File {
+  required string name = 1;
+  required uint64 fileid = 2;
+  required uint64 generation = 3;
+  required uint64 parent = 4;         // fsid of parent directory, used by
+                                      // the CreateFile message
+  required uint32 mode = 5;
+  required uint32 nlinks = 6;         // number of links
+
+  required uint64 filesize = 7;
+  required uint32 block_shift = 8;    // [16, 20], i.e., 64K and 1M block size
+  required uint64 nblocks = 9;        // # of blocks used
+
+  required uint32 owner_id = 10;
+  required uint32 group_id = 11;
+  required string gw_creator = 12;    // gateway that create this file
+  optional string gw_master = 13;     // gateway that now owns this file
+
+  optional uint64 create_time = 14;
+  optional uint64 change_time = 15;
+  optional uint32 rdev = 16;
+
+  repeated GatewayVersion vv = 17;    // version vector of file meta
+  repeated ACE acl = 18;
+
+  optional uint32 flags = 19;         // bit field of FileFlags
+}
+
+// Block map of a regular file. The file data are stored in cloud(s), where
+// each block is a <key, value> pair.  The key is the encrypted ciphertext of
+// <offset + version + last_modifier>; the value is the block data.
+//
+// Each block map contains at most MAX_BLOCK_MAP_LENGTH (2^16) blocks.
+// 
+// Znode path: <file-znode>/BLOCKMAP.n, where n is the index within all
+// blockmaps of the file
+message BlockMap {
+  required uint64 length = 1;         // this can be different from
+                                      // File::nblocks because we never
+                                      // truncate the block mapping to avoid
+                                      // replay attacks.
+
+  repeated bytes block_version = 2;   // compressed array of versions;
+                                      // 0 versions mean file holes
+
+  // block_version alone is enough to detect conflicts among gateways, but it
+  // does not stop gateways from overwrite conflicting data in question.
+  // With this last_modifier, the keys of all versions of blocks are unique
+  // despite conflicts.
+  repeated bytes last_modifier = 3;   // compressed gateways who made the last
+                                      // changes and bumped the version of
+                                      // blocks
+}
+
+message FileObject {
+  required ObjectType type = 1 [default = FILE];
+  required uint64 checksum = 2;
+  optional File file = 3;
+  optional Directory dir = 4;
+}
+
+enum OpenFlags {
+  READ = 1;
+  WRITE = 2;
+  LOCK = 4;
+}
+
+// Data format for ephemeral znode that corresponds to a file open owner.
+//
+// Znode path: <file-znode>/OPENOWNER.xxx, where xxx is the openowner's name
+message OpenOwner {
+  required uint32 flags = 1;          // bit field of OpenFlags
+  repeated secnfs.proto.FileExtentMeta lock = 2;
+}
+
+// vim:sw=2:ts=2:sts=2:tw=80:expandtab:cinoptions=>2,(0\:0:

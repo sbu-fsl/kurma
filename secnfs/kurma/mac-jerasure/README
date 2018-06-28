@@ -1,0 +1,19 @@
+Enable Jerasure in Mac OSX.
+
+1. Checkout Hybris repo: git clone https://github.com/pviotti/hybris.git
+
+2. Replace the three Makefiles under hybris/jerasure with the ones here, then make
+
+3. Then, copy the libJerasure.dylib and libJerasure.jni.jnilib under hybris/lib
+to /usr/local/lib
+
+4. Finally, add /usr/local/lib to java.path.library.  To do that in Eclipse:
+http://stackoverflow.com/questions/957700/how-to-set-the-java-library-path-from-eclipse
+Specifically: select Project, right click -> Properties / Java Build Path /
+Libraries tab, select the Jerasure.jar, expand it, select Native library
+location, click Edit, folder chooser dialog will appear)
+
+Now. JerasureTest should pass.
+
+References:
+http://mrjoelkemp.com/2012/01/getting-started-with-jni-and-c-on-osx-lion/

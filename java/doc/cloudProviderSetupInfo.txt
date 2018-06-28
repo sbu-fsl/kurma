@@ -1,0 +1,48 @@
+##############################################################################
+This file contains information regarding how to setup and connect to different
+cloud providers.
+
+Author: Harsh Patel (hcpatel@cs.stonybrook.edu)
+##############################################################################
+
+Common Instructions:
+
+To access to particular cloud storage you require two keys (access key and
+secret key). Once you get these keys (using following described steps for
+different cloud providers) you need to store these keys in one specific file
+named cloud-config-test.properties in fsl-nfs-ganesha/java/conf. You can change
+the available cloud providers in the same file. Refer to following steps for
+different cloud providers to generate required keys for cloud storage access.
+
+
+Generate Keys:
+
+A. Google Cloud Platform
+
+Steps:
+
+1. Create a project on Google Cloud Platform. For this, log into Google cloud
+platform using your email address and go to "select a project" drop down menu.
+From there click on "create a project".
+
+2. Once a project is created, select that project from the same drop down menu
+which will take you to the Dashboard. Now, select "filter product and services"
+from top left corner (icon with 3 horizontal lines) and go to "storage" from
+it.
+
+3. Now once you select it, you can create different buckets there. (We can also
+create bucket through APIs, Bucket is same as what we refer "container" in our
+Kurma code)
+
+4. Now we need to get access to this project to list all buckets and to perform
+some put and get operations. For that we require two keys: One access key and
+one secret key
+
+   To get these keys go to the "Settings" on the same "storage" page where we
+created buckets.  Now click on the "Interoperability" tab inside it and enable
+"Interoperable access" if it is not enabled already.
+
+   Once you do this, you can see one button named "Create a new Key". Click on
+that and it will generate "Access Key" and "Private Key" which can be used to
+connect to this particular project you have created.  Use common instructions
+stated at the start of this document to know how to use these keys.

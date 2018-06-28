@@ -1,0 +1,23 @@
+base/
+=====
+Utilities that are specific to SECNFS
+
+cache/
+======
+Proxy Cache
+
+capi/
+=====
+C API of the C++ libraries
+
+port/
+=====
+Portability tools that majorly come from LevelDB
+
+proto/
+======
+Format of communication messages and persistent data structures
+
+util/
+=====
+Utilities that are not specific to SECNFS
